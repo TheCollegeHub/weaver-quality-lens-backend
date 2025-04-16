@@ -1,5 +1,7 @@
 import { azureClient } from '../utils/azureClient.js';
+import redis from '../cache/redis.js';
 import dayjs from 'dayjs';
+import { SprintBugReport, TeamBugMetrics } from '../types/bug-metric-types.js';
 
 export async function getAllAreaPaths(project: string) {
   const paths: any = [];
@@ -26,8 +28,6 @@ export async function getAllAreaPaths(project: string) {
   await fetchAreas();
   return paths;
 }
-
-import redis from '../cache/redis.js';
 
 export async function getTestPlans(project: string) {
   const cacheKey = `plans:${project}`;
@@ -56,7 +56,7 @@ export async function getTestPlans(project: string) {
 
     console.log(`Total Plans: ${allPlans.length}`);
 
-    await redis.set(cacheKey, JSON.stringify(allPlans), 'EX', 600); // Cache por 10 minutos
+    await redis.set(cacheKey, JSON.stringify(allPlans), 'EX', 600); // Cache 10 min
 
     return allPlans;
   } catch (err) {
@@ -167,51 +167,6 @@ export async function getPassRateFromPlans(plans: any[], project: string) {
     passRate: total > 0 ? (passed / total * 100).toFixed(2) : '0.00'
   };
 }
-
-type TeamBugMetrics = {
-  areaPath: string;
-  path: string;
-  sprintName: string;
-  startDate: string;
-  endDate: string;
-  opened: {
-    total: number;
-    bugLinks: string[];
-  };
-  closed: {
-    total: number;
-    bugLinks: string[];
-  };
-  stillOpen: string;
-  bugAging: {
-    averageDays: string | null;
-    agingAboveThresholdLinks: string[];
-    bugAgingBySeverity: {
-      severity: string;
-      count: number;
-      averageDays: string;
-    }[];
-  };
-};
-
-type SprintBugReport = {
-  teamsBugs: TeamBugMetrics[];
-  overall: {
-    opened: number;
-    closed: number;
-    stillOpen: string;
-    bugAging: {
-      averageDays: string | null;
-      agingAboveThresholdLinks: string[];
-      bugAgingBySeverity: {
-        severity: string;
-        count: number;
-        averageDays: string;
-      }[];
-    };
-  };
-};
-
 
 export async function getBugMetricsBySprints(project: string, areaPaths?: string[]): Promise<SprintBugReport> {
   const org = process.env.AZURE_ORG_NAME;
@@ -617,6 +572,138 @@ export async function getBugLeakageBreakdown(areaPaths: string[]) {
 
   return results;
 }
+
+export async function getBugLeakageBySprint(teamList: string[]) {
+  const apiVersion = process.env.AZURE_API_VERSION;
+  const project = decodeURIComponent(process.env.ADO_PROJECT!);
+  const ADO_BUG_ENVIRONMT_CUSTOM_FIELD = process.env.ADO_BUG_ENVIRONMT_CUSTOM_FIELD!;
+  const ADO_PROD_ENVIRONMENT_LABEL = process.env.ADO_PROD_ENVIRONMENT_LABEL!;
+
+  const results = {
+    teams: [] as any[],
+    sprintOveral: [] as any[]
+  };
+
+  const sprintAggregation: Record<string, { prod: number; preProd: number }> = {};
+
+  for (const team of teamList) {
+    const iterationsRes = await azureClient.get(`/${project}/_apis/work/teamsettings/iterations?api-version=${apiVersion}`);
+    const recentIterations = iterationsRes.data.value
+      .filter((i: any) => i.attributes?.finishDate && dayjs(i.attributes.finishDate).isBefore(dayjs()))
+      .sort((a: any, b: any) => dayjs(b.attributes.finishDate).diff(dayjs(a.attributes.finishDate)))
+      .slice(0, 5);
+
+    for (const iteration of recentIterations) {
+      const iterationPath = iteration.path;
+      const sprintName = iteration.name;
+
+      const wiqlQuery = {
+        query: `
+          SELECT [System.Id]
+          FROM WorkItems
+          WHERE 
+            [System.TeamProject] = '${project}'
+            AND [System.WorkItemType] = 'Bug'
+            AND [System.AreaPath] UNDER '${project}\\${team}'
+            AND [System.IterationPath] = '${iterationPath}'
+        `
+      };
+
+      const res = await azureClient.post(`/${encodeURIComponent(project)}/_apis/wit/wiql?api-version=${apiVersion}`, wiqlQuery);
+      const ids = res.data.workItems.map((w: any) => w.id);
+
+      const envMap: Record<string, any> = {};
+      let prodCount = 0;
+      let preProdCount = 0;
+
+      if (ids.length) {
+        const batchSize = 200;
+        for (let i = 0; i < ids.length; i += batchSize) {
+          const batch = ids.slice(i, i + batchSize);
+
+          const detailRes = await azureClient.post(`/_apis/wit/workitemsbatch?api-version=7.1`, {
+            ids: batch,
+            fields: [
+              'System.Id',
+              'Microsoft.VSTS.Common.Severity',
+              ADO_BUG_ENVIRONMT_CUSTOM_FIELD
+            ]
+          });
+
+          for (const item of detailRes.data.value) {
+            const envRaw = item.fields[ADO_BUG_ENVIRONMT_CUSTOM_FIELD] || 'UNKNOWN';
+            const env = envRaw.trim().toUpperCase();
+            const severity = item.fields['Microsoft.VSTS.Common.Severity'] || 'UNKNOWN';
+
+            if (env.includes(ADO_PROD_ENVIRONMENT_LABEL)) {
+              prodCount++;
+            } else {
+              preProdCount++;
+            }
+
+            if (!envMap[env]) {
+              envMap[env] = {
+                total: 0,
+                severities: {}
+              };
+            }
+
+            envMap[env].total++;
+            envMap[env].severities[severity] = (envMap[env].severities[severity] || 0) + 1;
+          }
+        }
+      }
+
+      if (!sprintAggregation[sprintName]) {
+        sprintAggregation[sprintName] = { prod: 0, preProd: 0 };
+      }
+      sprintAggregation[sprintName].prod += prodCount;
+      sprintAggregation[sprintName].preProd += preProdCount;
+
+      const orderedEnvMap = Object.keys(envMap).sort().map(env => {
+        const severitiesList = Object.entries(envMap[env].severities)
+          .filter(([s, count]) => !(s === 'UNKNOWN' && count === 0))
+          .map(([severity, count]) => ({
+            severity,
+            total: count
+          }))
+          .sort((a, b) => a.severity.localeCompare(b.severity));
+
+        return {
+          environment: env,
+          total: envMap[env].total,
+          severities: severitiesList
+        };
+      });
+
+      const bugLeakage = prodCount + preProdCount === 0
+        ? 0
+        : (prodCount / (prodCount + preProdCount)) * 100;
+
+      results.teams.push({
+        team,
+        sprint: sprintName,
+        totalBugs: prodCount + preProdCount,
+        bugLeakagePct: `${bugLeakage.toFixed(2)}%`,
+        environments: orderedEnvMap
+      });
+    }
+  }
+
+  results.sprintOveral = Object.entries(sprintAggregation).map(([sprintName, { prod, preProd }]) => {
+    const bugLeakage = prod + preProd === 0 ? 0 : (prod / (prod + preProd)) * 100;
+    return {
+      sprint: sprintName,
+      totalBugs: prod + preProd,
+      prod,
+      preProd,
+      bugLeakagePct: `${bugLeakage.toFixed(2)}%`
+    };
+  }).sort((a, b) => a.sprint.localeCompare(b.sprint));
+
+  return results;
+}
+
 
 
   

@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import redis from '../cache/redis.js';
-import { filterPlansByArea, getAllAreaPaths, getAutomationMetrics, getBugDetailsFromLinks, getBugLeakageBreakdown, getBugMetricsBySprints, getPassRateFromPlans, getTestPlans} from '../services/azure.service.js';
+import { filterPlansByArea, getAllAreaPaths, getAutomationMetrics, getBugDetailsFromLinks, getBugLeakageBreakdown, getBugLeakageBySprint, getBugMetricsBySprints, getPassRateFromPlans, getTestPlans} from '../services/azure.service.js';
 
 const router = Router();
 
@@ -23,7 +23,7 @@ router.get('/plans/by-area', async (req, res) => {
 
   try {
     const project = process.env.ADO_PROJECT;
-    const cacheKey = `plans:by-area:${areaPath}`;  // Definindo chave para cache com base no areaPath
+    const cacheKey = `plans:by-area:${areaPath}`;
     const cachedPlans = await redis.get(cacheKey);
     if (cachedPlans) {
       return res.json(JSON.parse(cachedPlans));
@@ -134,8 +134,27 @@ router.post('/bug-leakage', async (req, res) => {
     const result = await getBugLeakageBreakdown(areaPaths);
     return res.json(result);
   } catch (error) {
-    console.error('Erro ao calcular Bug Leakage:', error);
-    return res.status(500).json({ error: 'Erro ao calcular Bug Leakage' });
+    console.error('Error to calculate Bug Leakage:', error);
+    return res.status(500).json({ error: 'Error to calculate Bug Leakage:' });
+  }
+});
+
+router.get('/bug-leakage-sprint', async (req, res) => {
+  try {
+    const squadsParam = req.query.squads as string;
+
+    if (!squadsParam) {
+      return res.status(400).json({ error: 'Parameter "squads" is required.' });
+    }
+
+    const areaPaths = squadsParam ? String(squadsParam).split(',') : undefined;
+
+    const results = await getBugLeakageBySprint(areaPaths!);
+
+    res.json(results);
+  } catch (error) {
+    console.error('Error to get Bug Leakage:', error);
+    res.status(500).json({ error: 'Internal Error to get Bug Leakage:' });
   }
 });
 
