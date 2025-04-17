@@ -27,6 +27,7 @@ export type TeamBugMetrics = {
 
 export type SprintBugReport = {
   teamsBugs: TeamBugMetrics[];
+  sprintOveralls: SprintBugOverall[];
   overall: {
     opened: number;
     closed: number;
@@ -42,3 +43,21 @@ export type SprintBugReport = {
     };
   };
 };
+
+export type SprintBugOverall = {
+  sprintName: string;
+  startDate: string;
+  endDate: string,
+  opened: number;
+  closed: number;
+  stillOpen: string,
+  bugAging: {
+    averageDays: string | null;
+    agingAboveThresholdLinks: string[];
+    bugAgingBySeverity: {
+      severity: string;
+      count: number;
+      averageDays: string;
+    }[];
+  };
+}

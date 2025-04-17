@@ -1,20 +1,10 @@
 import { Router } from 'express';
 import redis from '../cache/redis.js';
-import { filterPlansByArea, getAllAreaPaths, getAutomationMetrics, getBugDetailsFromLinks, getBugLeakageBreakdown, getBugLeakageBySprint, getBugMetricsBySprints, getPassRateFromPlans, getTestPlans} from '../services/azure.service.js';
+import { filterPlansByArea, getAutomationMetrics, getBugDetailsFromLinks, getBugLeakageBreakdown, getBugLeakageBySprint, getBugMetricsBySprints, getPassRateFromPlans, getTestPlans} from '../services/azure.service.js';
 
 const router = Router();
 
-router.get('/areas', async (req, res) => {
-  try {
-    const project = process.env.ADO_PROJECT;
-    const areas = await getAllAreaPaths(project!);
-    res.json(areas);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-router.get('/plans/by-area', async (req, res) => {
+router.get('/v1/plans/by-area', async (req, res) => {
   const { areaPath } = req.query;
 
   if (!areaPath) {
@@ -47,7 +37,7 @@ router.get('/plans/by-area', async (req, res) => {
 
 
 
-router.get('/tests/automation', async (req, res) => {
+router.get('/v1/tests/automation', async (req, res) => {
   const { planId, planNames, areaPaths, cache = 'true' } = req.query;
 
   const planNamesList = planNames ? String(planNames).split(',') : undefined;
@@ -75,7 +65,7 @@ router.get('/tests/automation', async (req, res) => {
   }
 });
 
-router.get('/tests/automation/pass-rate', async (req, res) => {
+router.get('/v1/tests/automation/pass-rate', async (req, res) => {
   const { planIds } = req.query;
   if (!planIds) {
     return res.status(400).json({ error: 'planIds is required' });
@@ -96,7 +86,7 @@ router.get('/tests/automation/pass-rate', async (req, res) => {
   }
 });
 
-router.get('/bugs-by-sprint', async (req, res) => {
+router.get('/v1/teams/bugs-by-sprint', async (req, res) => {
   const { areaPaths } = req.query;
 
   const areaPathList = areaPaths ? String(areaPaths).split(',') : undefined;
@@ -111,7 +101,7 @@ router.get('/bugs-by-sprint', async (req, res) => {
   }
 });
 
-router.post('/bug-details', async (req, res) => {
+router.post('/v1/teams/bug-details', async (req, res) => {
   try {
     const { links } = req.body;
 
@@ -127,7 +117,7 @@ router.post('/bug-details', async (req, res) => {
   }
 });
 
-router.post('/bug-leakage', async (req, res) => {
+router.post('/v1/teams/bug-leakage', async (req, res) => {
   try {
     const { areaPaths } = req.body;
 
@@ -139,15 +129,15 @@ router.post('/bug-leakage', async (req, res) => {
   }
 });
 
-router.get('/bug-leakage-sprint', async (req, res) => {
+router.get('/v1/teams/bug-leakage-sprint', async (req, res) => {
   try {
-    const squadsParam = req.query.squads as string;
+    const areaPathsList = req.query.areaPaths as string;
 
-    if (!squadsParam) {
+    if (!areaPathsList) {
       return res.status(400).json({ error: 'Parameter "squads" is required.' });
     }
 
-    const areaPaths = squadsParam ? String(squadsParam).split(',') : undefined;
+    const areaPaths = areaPathsList ? String(areaPathsList).split(',') : undefined;
 
     const results = await getBugLeakageBySprint(areaPaths!);
 
