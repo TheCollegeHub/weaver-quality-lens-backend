@@ -24,4 +24,5 @@ export interface LeakEnvDetail {
   export interface BugLeakageBySprintResult {
     teams: TeamLeakageEntry[];
     sprintOverall: SprintOverallEntry[];
+    overall: LeakEnvDetail[];
   }

@@ -657,20 +657,21 @@ export async function getBugLeakageBySprint(areaPaths: string[]): Promise<BugLea
   const ADO_BUG_ENVIRONMT_CUSTOM_FIELD = process.env.ADO_BUG_ENVIRONMT_CUSTOM_FIELD!;
   const ADO_PROD_ENVIRONMENT_LABEL = process.env.ADO_PROD_ENVIRONMENT_LABEL!;
 
-  // Accumulators for overall per‐sprint
   const sprintCounts: Record<string, { prod: number; preProd: number }> = {};
   const sprintEnvAgg: Record<string, Record<string, { total: number; severities: Record<string, number> }>> = {};
+  const overallEnvAgg: Record<string, { total: number; severities: Record<string, number> }> = {};
 
   const results: BugLeakageBySprintResult = {
     teams: [],
-    sprintOverall: []
+    sprintOverall: [],
+    overall: []
   };
 
   for (const areaPath of areaPaths) {
-    // Fetch last 5 past iterations
     const itersRes = await azureClient.get(
       `/${project}/_apis/work/teamsettings/iterations?api-version=${apiVersion}`
     );
+
     const recentIters = itersRes.data.value
       .filter((i: any) => i.attributes?.finishDate && dayjs(i.attributes.finishDate).isBefore(dayjs()))
       .sort((a: any, b: any) => dayjs(b.attributes.finishDate).diff(dayjs(a.attributes.finishDate)))
@@ -680,7 +681,6 @@ export async function getBugLeakageBySprint(areaPaths: string[]): Promise<BugLea
       const sprintName = iter.name;
       const iterationPath = iter.path;
 
-      // WIQL to get bug IDs
       const wiql = {
         query: `
           SELECT [System.Id]
@@ -691,13 +691,13 @@ export async function getBugLeakageBySprint(areaPaths: string[]): Promise<BugLea
              AND [System.IterationPath] = '${iterationPath}'
         `
       };
+
       const wiqlRes = await azureClient.post(
         `/${encodeURIComponent(project)}/_apis/wit/wiql?api-version=${apiVersion}`,
         wiql
       );
       const ids: number[] = wiqlRes.data.workItems.map((w: any) => w.id);
 
-      // Per‐environment counts for this areaPath+sprint
       const envMap: Record<string, { total: number; severities: Record<string, number> }> = {};
       let prodCount = 0;
       let preProdCount = 0;
@@ -723,14 +723,12 @@ export async function getBugLeakageBySprint(areaPaths: string[]): Promise<BugLea
             const env = envRaw.trim().toUpperCase();
             const sev = bug.fields['Microsoft.VSTS.Common.Severity'] || 'UNKNOWN';
 
-            // prod vs preProd
             if (env.includes(ADO_PROD_ENVIRONMENT_LABEL)) {
               prodCount++;
             } else {
               preProdCount++;
             }
 
-            // accumulate in envMap
             if (!envMap[env]) {
               envMap[env] = { total: 0, severities: {} };
             }
@@ -740,7 +738,6 @@ export async function getBugLeakageBySprint(areaPaths: string[]): Promise<BugLea
         }
       }
 
-      // 1) Populate teams array
       const total = prodCount + preProdCount;
       const pct = total === 0 ? '0.00%' : `${((prodCount / total) * 100).toFixed(2)}%`;
       const orderedEnvMap: LeakEnvDetail[] = Object.entries(envMap)
@@ -762,24 +759,29 @@ export async function getBugLeakageBySprint(areaPaths: string[]): Promise<BugLea
         environments: orderedEnvMap
       });
 
-      // 2) Accumulate for sprintOverall
       sprintCounts[sprintName] = sprintCounts[sprintName] || { prod: 0, preProd: 0 };
       sprintCounts[sprintName].prod += prodCount;
       sprintCounts[sprintName].preProd += preProdCount;
 
       sprintEnvAgg[sprintName] = sprintEnvAgg[sprintName] || {};
       for (const [env, { total, severities }] of Object.entries(envMap)) {
-        const agg = sprintEnvAgg[sprintName][env] || { total: 0, severities: {} };
-        agg.total += total;
+        const sprintAgg = sprintEnvAgg[sprintName][env] || { total: 0, severities: {} };
+        sprintAgg.total += total;
         for (const [sev, count] of Object.entries(severities)) {
-          agg.severities[sev] = (agg.severities[sev] || 0) + count;
+          sprintAgg.severities[sev] = (sprintAgg.severities[sev] || 0) + count;
         }
-        sprintEnvAgg[sprintName][env] = agg;
+        sprintEnvAgg[sprintName][env] = sprintAgg;
+
+        const overallAgg = overallEnvAgg[env] || { total: 0, severities: {} };
+        overallAgg.total += total;
+        for (const [sev, count] of Object.entries(severities)) {
+          overallAgg.severities[sev] = (overallAgg.severities[sev] || 0) + count;
+        }
+        overallEnvAgg[env] = overallAgg;
       }
     }
   }
 
-  // Build sprintOverall
   results.sprintOverall = Object.entries(sprintCounts)
     .map(([sprint, { prod, preProd }]) => {
       const total = prod + preProd;
@@ -806,8 +808,20 @@ export async function getBugLeakageBySprint(areaPaths: string[]): Promise<BugLea
     })
     .sort((a, b) => a.sprint.localeCompare(b.sprint));
 
+  results.overall = Object.entries(overallEnvAgg)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([env, { total, severities }]) => ({
+      environment: env,
+      total,
+      severities: Object.entries(severities)
+        .filter(([, c]) => c > 0)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([severity, count]) => ({ severity, total: count }))
+    }));
+
   return results;
 }
+
 
 
 
