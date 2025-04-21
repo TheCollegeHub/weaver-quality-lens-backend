@@ -1,7 +1,7 @@
 import { azureClient } from '../utils/azureClient.js';
 import redis from '../cache/redis.js';
 import dayjs from 'dayjs';
-import { SprintBugOverall, SprintBugReport, TeamBugMetrics } from '../types/bug-metric-types.js';
+import { SprintBugReport, SprintData } from '../types/bug-metric-types.js';
 import { BugLeakageBySprintResult, LeakEnvDetail } from '../types/leak-types.js';
 
 export async function getAllAreaPaths(project: string) {
@@ -169,12 +169,12 @@ export async function getPassRateFromPlans(plans: any[], project: string) {
   };
 }
 
-export async function getBugMetricsBySprints(project: string, areaPaths?: string[]): Promise<SprintBugReport> {
-  const org = process.env.AZURE_ORG_NAME;
+const getPastSprints = async (project: string, numSprints: number): Promise<SprintData[]> => {
   const apiVersion = process.env.AZURE_API_VERSION;
   const iterationsUrl = `/${project}/_apis/work/teamsettings/iterations?api-version=${apiVersion}`;
   const { data } = await azureClient.get(iterationsUrl);
 
+  // console.log(data.value[0].attributes)
   const pastSprints = data.value
     .filter((s: any) =>
       s.attributes?.startDate &&
@@ -184,10 +184,23 @@ export async function getBugMetricsBySprints(project: string, areaPaths?: string
     .sort((a: any, b: any) =>
       new Date(b.attributes.startDate).getTime() - new Date(a.attributes.startDate).getTime()
     )
-    .slice(0, 2);
+    .slice(0, numSprints)
+    .map((s: any) => ({
+      name: s.name,
+      iterationPath: s.path,
+      startDate: s.attributes.startDate,
+      finishDate: s.attributes.finishDate,
+      timeFrame: s.attributes.timeFrame
+    }));
 
-  const teamsBugs: TeamBugMetrics[] = [];
-  const sprintOveralls: SprintBugOverall[] = [];
+  return pastSprints;
+};
+
+export async function getBugMetricsBySprints(project: string, areaPaths?: string[]): Promise<SprintBugReport> {
+  const apiVersion = process.env.AZURE_API_VERSION;
+  const pastSprints = await getPastSprints(project, 2);
+  const teamsBugs: SprintBugReport['teams'] = [];
+  const sprintOveralls: SprintBugReport['sprintOveralls'] = [];
 
   let totalOpened = 0;
   let totalClosed = 0;
@@ -198,10 +211,11 @@ export async function getBugMetricsBySprints(project: string, areaPaths?: string
   let overallAgingAboveThresholdLinks: string[] = [];
   const overallAgingBySeverity: Record<string, { count: number; totalDays: number }> = {};
 
+  console.log(pastSprints);
+
   for (const sprint of pastSprints) {
-    const { startDate, finishDate } = sprint.attributes;
-    const start = new Date(startDate);
-    const end = new Date(finishDate);
+    const start = new Date(sprint.startDate);
+    const end = new Date(sprint.finishDate);
     end.setHours(23, 59, 59, 999);
 
     if (!areaPaths?.length) break;
@@ -224,7 +238,7 @@ export async function getBugMetricsBySprints(project: string, areaPaths?: string
             [System.TeamProject] = '${decodeURIComponent(project)}'
             AND [System.WorkItemType] = 'Bug'
             AND [System.AreaPath] UNDER '${areaPath}'
-            AND [System.IterationPath] UNDER '${sprint.path}'
+            AND [System.IterationPath] UNDER '${sprint.iterationPath}'
         `
       };
 
@@ -279,15 +293,6 @@ export async function getBugMetricsBySprints(project: string, areaPaths?: string
               totalAgingDays += agingDays;
               totalClosedForAging++;
 
-              console.log("Bugs Closed Aging")
-              console.log(item.id);
-              console.log(created)
-              console.log(closed)
-              console.log(totalAgingDays)
-              console.log(totalClosedForAging)
-              console.log("====")
-                            
-
               if (!areaAgingBySeverity[severity]) {
                 areaAgingBySeverity[severity] = { count: 0, totalDays: 0 };
               }
@@ -305,7 +310,6 @@ export async function getBugMetricsBySprints(project: string, areaPaths?: string
               }
               overallAgingBySeverity[severity].count++;
               overallAgingBySeverity[severity].totalDays += agingDays;
-
 
               if (agingDays > 7) {
                 const link = `https://dev.azure.com/${process.env.ADO_ORGANIZATION}/${project}/_workitems/edit/${item.id}`;
@@ -348,27 +352,41 @@ export async function getBugMetricsBySprints(project: string, areaPaths?: string
           averageDays: (data.totalDays / data.count).toFixed(2)
         }));
 
-      teamsBugs.push({
-        areaPath,
-        path: sprint.path,
-        sprintName: sprint.name,
-        startDate,
-        endDate: finishDate,
-        opened: {
-          total: openedIds.length,
-          bugLinks: openedLinks
+      let team = teamsBugs.find(team => team.areaPath === areaPath);
+      if (!team) {
+        team = {
+          areaPath,
+          sprints: []
+        };
+        teamsBugs.push(team);
+      }
+
+      const sprintMetric = {
+        sprint: {
+          name: sprint.name,
+          iterationPath: sprint.iterationPath,
+          startDate: sprint.startDate,
+          finishDate: sprint.finishDate
         },
-        closed: {
-          total: closedIds.length,
-          bugLinks: closedLinks
+        openAndClosedBugMetric: {
+          opened: {
+            total: openedIds.length,
+            bugLinks: openedLinks
+          },
+          closed: {
+            total: closedIds.length,
+            bugLinks: closedLinks
+          },
+          stillOpen: stillOpenPct
         },
-        stillOpen: stillOpenPct,
         bugAging: {
           averageDays: sprintAreaClosedCount === 0 ? null : (sprintAreaAgingTotal / sprintAreaClosedCount).toFixed(2),
           agingAboveThresholdLinks,
           bugAgingBySeverity: bugAgingBySeverityArray
         }
-      });
+      }
+      team.sprints.push(sprintMetric);
+      
     }
 
     const sprintStillOpenRaw = sprintOpened === 0
@@ -386,12 +404,23 @@ export async function getBugMetricsBySprints(project: string, areaPaths?: string
       }));
 
     sprintOveralls.push({
-      sprintName: sprint.name,
-      startDate,
-      endDate: finishDate,
-      opened: sprintOpened,
-      closed: sprintClosed,
-      stillOpen: sprintStillOpenPct,
+      sprint: {
+        name: sprint.name,
+        iterationPath: sprint.iterationPath,
+        startDate: sprint.startDate,
+        finishDate: sprint.finishDate
+      },
+      openAndClosedBugMetric: {
+        opened: {
+          total: sprintOpened,
+          bugLinks: sprintOpenedLinks
+        },
+        closed: {
+          total: sprintClosed,
+          bugLinks: sprintClosedLinks
+        },
+        stillOpen: sprintStillOpenPct
+      },
       bugAging: {
         averageDays: sprintClosedForAging === 0 ? null : (sprintTotalAgingDays / sprintClosedForAging).toFixed(2),
         agingAboveThresholdLinks: sprintAgingAboveThresholdLinks,
@@ -413,16 +442,22 @@ export async function getBugMetricsBySprints(project: string, areaPaths?: string
       count: data.count,
       averageDays: (data.totalDays / data.count).toFixed(2)
     }));
-  
-  console.log(totalAgingDays)
-  console.log(totalClosedForAging);
+
   return {
-    teamsBugs,
+    teams: teamsBugs,
     sprintOveralls,
     overall: {
-      opened: totalOpened,
-      closed: totalClosed,
-      stillOpen: overallStillOpenPct,
+      openAndClosedBugMetric: {
+        opened: {
+          total: totalOpened,
+          bugLinks: totalOpenedLinks
+        },
+        closed: {
+          total: totalClosed,
+          bugLinks: totalClosedLinks
+        },
+        stillOpen: overallStillOpenPct
+      },
       bugAging: {
         averageDays: totalClosedForAging === 0 ? null : (totalAgingDays / totalClosedForAging).toFixed(2),
         agingAboveThresholdLinks: overallAgingAboveThresholdLinks,
@@ -431,6 +466,7 @@ export async function getBugMetricsBySprints(project: string, areaPaths?: string
     }
   };
 }
+
 
 
 

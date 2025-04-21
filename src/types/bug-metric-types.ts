@@ -1,10 +1,12 @@
-
-export type TeamBugMetrics = {
-  areaPath: string;
-  path: string;
-  sprintName: string;
+export type SprintData = {
+  name: string;
+  iterationPath: string;
   startDate: string;
-  endDate: string;
+  finishDate: string;
+  timeFrame?: string;
+}
+
+export type OpenAndCLosedBugMetric = {
   opened: {
     total: number;
     bugLinks: string[];
@@ -14,50 +16,34 @@ export type TeamBugMetrics = {
     bugLinks: string[];
   };
   stillOpen: string;
-  bugAging: {
+}
+
+export type BugAging = {
     averageDays: string | null;
     agingAboveThresholdLinks: string[];
     bugAgingBySeverity: {
       severity: string;
       count: number;
       averageDays: string;
-    }[];
-  };
-};
+    }[]
+}
 
 export type SprintBugReport = {
-  teamsBugs: TeamBugMetrics[];
-  sprintOveralls: SprintBugOverall[];
+  teams: {
+    areaPath: string
+    sprints: {
+      sprint: SprintData
+      openAndClosedBugMetric?: OpenAndCLosedBugMetric,
+      bugAging?: BugAging;
+    }[]
+  }[],
+  sprintOveralls: {
+    sprint: SprintData
+    openAndClosedBugMetric?: OpenAndCLosedBugMetric,
+    bugAging: BugAging;
+  }[],
   overall: {
-    opened: number;
-    closed: number;
-    stillOpen: string;
-    bugAging: {
-      averageDays: string | null;
-      agingAboveThresholdLinks: string[];
-      bugAgingBySeverity: {
-        severity: string;
-        count: number;
-        averageDays: string;
-      }[];
-    };
+    openAndClosedBugMetric?: OpenAndCLosedBugMetric,
+    bugAging: BugAging;
   };
 };
-
-export type SprintBugOverall = {
-  sprintName: string;
-  startDate: string;
-  endDate: string,
-  opened: number;
-  closed: number;
-  stillOpen: string,
-  bugAging: {
-    averageDays: string | null;
-    agingAboveThresholdLinks: string[];
-    bugAgingBySeverity: {
-      severity: string;
-      count: number;
-      averageDays: string;
-    }[];
-  };
-}
