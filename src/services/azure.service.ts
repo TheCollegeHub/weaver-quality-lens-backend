@@ -169,7 +169,7 @@ export async function getPassRateFromPlans(plans: any[], project: string) {
   };
 }
 
-const getPastSprints = async (project: string, numSprints: number): Promise<SprintData[]> => {
+const getPastSprintsByTeamSettings= async (project: string, numSprints: number): Promise<SprintData[]> => {
   const apiVersion = process.env.AZURE_API_VERSION;
   const iterationsUrl = `/${project}/_apis/work/teamsettings/iterations?api-version=${apiVersion}`;
   const { data } = await azureClient.get(iterationsUrl);
@@ -196,9 +196,52 @@ const getPastSprints = async (project: string, numSprints: number): Promise<Spri
   return pastSprints;
 };
 
-export async function getBugMetricsBySprints(project: string, areaPaths?: string[]): Promise<SprintBugReport> {
+const getPastSprintsByClassificationNodes = async (project: string, areaPaths: string[], numSprints: number): Promise<SprintData[]> => {
   const apiVersion = process.env.AZURE_API_VERSION;
-  const pastSprints = await getPastSprints(project, 2);
+  const iterationsUrl = `/${project}/_apis/wit/classificationnodes/iterations?$depth=3&api-version=${apiVersion}`;
+  const { data } = await azureClient.get(iterationsUrl);
+
+  const now = new Date();
+
+  const teamNames = areaPaths!.map(areaPath => {
+    const parts = areaPath.split('\\');
+    return parts[1]?.toLowerCase();
+  }).filter(Boolean);
+
+  const teamNodes = data.children.filter((node: any) =>
+    teamNames.includes(node.name.toLowerCase())
+  );
+
+  const allSprints = teamNodes.flatMap((teamNode: any) => {
+    const teamIterationPath = teamNode.path.replace(/\\Iteration/, '');
+
+    return (teamNode.children || [])
+      .filter((sprint: any) => sprint.attributes?.startDate && sprint.attributes?.finishDate)
+      .filter((sprint: any) => new Date(sprint.attributes.finishDate) < now)
+      .map((sprint: any) => ({
+        name: sprint.name,
+        iterationPath: `${teamIterationPath}\\${sprint.name}`.replace(/^\\/, ''), // Remove a barra invertida inicial
+        startDate: sprint.attributes.startDate,
+        finishDate: sprint.attributes.finishDate,
+        timeFrame: sprint.attributes.timeFrame,
+      }));
+  });
+
+  const uniqueSprints = allSprints.filter((sprint: { iterationPath: any; }, index: any, self: any[]) => 
+    index === self.findIndex((t) => t.iterationPath === sprint.iterationPath)
+  );
+
+  const sortedSprints = uniqueSprints
+    .sort((a: any, b: any) => new Date(b.startDate).getTime() - new Date(a.startDate).getTime())
+    .slice(0, numSprints);
+
+  return sortedSprints;
+};
+
+export async function getBugMetricsBySprints(project: string, areaPaths: string[], numSprints: number): Promise<SprintBugReport> {
+  const apiVersion = process.env.AZURE_API_VERSION;
+  const pastSprints = await getPastSprintsByTeamSettings(project, numSprints);
+  console.log(pastSprints)
   const teamsBugs: SprintBugReport['teams'] = [];
   const sprintOveralls: SprintBugReport['sprintOveralls'] = [];
 
@@ -210,8 +253,6 @@ export async function getBugMetricsBySprints(project: string, areaPaths?: string
   let totalClosedForAging = 0;
   let overallAgingAboveThresholdLinks: string[] = [];
   const overallAgingBySeverity: Record<string, { count: number; totalDays: number }> = {};
-
-  console.log(pastSprints);
 
   for (const sprint of pastSprints) {
     const start = new Date(sprint.startDate);
@@ -279,13 +320,17 @@ export async function getBugMetricsBySprints(project: string, areaPaths?: string
             const severity = item.fields['Microsoft.VSTS.Common.Severity'] || 'Unknown';
 
             const createdInSprint = created >= start && created <= end;
-            const closedInSprint = closed && closed >= start && closed <= end;
-
+            
+            // const closedInSprint = closed && closed >= start && closed <= end;
+            // How to handle when bug belongs to Sprint was closed but after Sprint was finished? 
+            // It happens when the team forgets to update work item status before sprint is fininished.
+            const closedInSprint = closed && closed >= start;
+            
             if (createdInSprint) openedIds.push(item.id);
             if (closedInSprint) {
               closedIds.push(item.id);
 
-              const agingDays = Math.ceil((closed.getTime() - created.getTime()) / (1000 * 60 * 60 * 24));
+              const agingDays = Math.ceil((closed!.getTime() - created.getTime()) / (1000 * 60 * 60 * 24));
               sprintAreaAgingTotal += agingDays;
               sprintAreaClosedCount++;
               sprintTotalAgingDays += agingDays;
@@ -687,7 +732,7 @@ export async function getBugLeakageBreakdown(areaPaths: string[]) {
   return results;
 }
 
-export async function getBugLeakageBySprint(areaPaths: string[]): Promise<BugLeakageBySprintResult> {
+export async function getBugLeakageBySprint(areaPaths: string[], numSprints: number): Promise<BugLeakageBySprintResult> {
   const apiVersion = process.env.AZURE_API_VERSION!;
   const project = decodeURIComponent(process.env.ADO_PROJECT!);
   const ADO_BUG_ENVIRONMT_CUSTOM_FIELD = process.env.ADO_BUG_ENVIRONMT_CUSTOM_FIELD!;
@@ -711,7 +756,7 @@ export async function getBugLeakageBySprint(areaPaths: string[]): Promise<BugLea
     const recentIters = itersRes.data.value
       .filter((i: any) => i.attributes?.finishDate && dayjs(i.attributes.finishDate).isBefore(dayjs()))
       .sort((a: any, b: any) => dayjs(b.attributes.finishDate).diff(dayjs(a.attributes.finishDate)))
-      .slice(0, 5);
+      .slice(0, numSprints);
 
     for (const iter of recentIters) {
       const sprintName = iter.name;

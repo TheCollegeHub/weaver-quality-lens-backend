@@ -87,13 +87,13 @@ router.get('/v1/tests/automation/pass-rate', async (req, res) => {
 });
 
 router.get('/v1/teams/bugs-by-sprint', async (req, res) => {
-  const { areaPaths } = req.query;
+  const { areaPaths, numSprints} = req.query;
 
   const areaPathList = areaPaths ? String(areaPaths).split(',') : undefined;
 
   try {
     const project = process.env.ADO_PROJECT!;
-    const metrics = await getBugMetricsBySprints(project, areaPathList!);
+    const metrics = await getBugMetricsBySprints(project, areaPathList!, Number(numSprints));
     res.json(metrics);
   } catch (err: any) {
     console.error(err);
@@ -131,15 +131,16 @@ router.post('/v1/teams/bug-leakage', async (req, res) => {
 
 router.get('/v1/teams/bug-leakage-sprint', async (req, res) => {
   try {
-    const areaPathsList = req.query.areaPaths as string;
 
-    if (!areaPathsList) {
+    const { areaPaths, numSprints} = req.query;
+
+    if (!areaPaths) {
       return res.status(400).json({ error: 'Parameter "squads" is required.' });
     }
 
-    const areaPaths = areaPathsList ? String(areaPathsList).split(',') : undefined;
+    const areaPathsList = areaPaths ? String(areaPaths).split(',') : undefined;
 
-    const results = await getBugLeakageBySprint(areaPaths!);
+    const results = await getBugLeakageBySprint(areaPathsList!, Number(numSprints));
 
     res.json(results);
   } catch (error) {
