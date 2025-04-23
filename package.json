@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "npx tsx src/server.ts",
+    "dev": "npx tsx watch src/server.ts",
     "start": "node --loader ts-node/esm src/server.ts"
   },
   "dependencies": {

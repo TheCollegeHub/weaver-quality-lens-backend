@@ -1,33 +1,22 @@
 import { Router } from 'express';
-import redis from '../cache/redis.js';
-import { filterPlansByArea, getAutomationMetrics, getBugDetailsFromLinks, getBugLeakageBreakdown, getBugLeakageBySprint, getBugMetricsBySprints, getPassRateFromPlans, getTestPlans} from '../services/azure.service.js';
+import { getPassRateFromPlans, getTestPlans, getTestPlansByAreaPaths } from '../services/azure.service.js';
+import { getAutomationMetricsForPlans } from '../services/azure-plans.service.js';
 
 const router = Router();
 
-router.get('/v1/plans/by-area', async (req, res) => {
-  const { areaPath } = req.query;
+router.get('/v1/testplans', async (req, res) => {
+  const { areaPaths } = req.query;
 
-  if (!areaPath) {
-    return res.status(400).json({ error: 'areaPath is required' });
+  const areaPathList = areaPaths ? String(areaPaths).split(',').map(p => p.trim()) : undefined;
+
+  if (!areaPathList || areaPathList.length === 0) {
+    return res.status(400).json({ error: 'areaPaths is required' });
   }
 
   try {
     const project = process.env.ADO_PROJECT;
-    const cacheKey = `plans:by-area:${areaPath}`;
-    const cachedPlans = await redis.get(cacheKey);
-    if (cachedPlans) {
-      return res.json(JSON.parse(cachedPlans));
-    }
 
-    const allPlans = await getTestPlans(project!);
-    const filtered = filterPlansByArea(allPlans, [String(areaPath)]);
-
-    const result = filtered.map((p) => ({
-      id: p.id,
-      name: p.name,
-    }));
-
-    await redis.set(cacheKey, JSON.stringify(result), 'EX', 600);
+    const result = await getTestPlansByAreaPaths(project!, areaPathList);
 
     res.json(result);
   } catch (err: any) {
@@ -35,35 +24,28 @@ router.get('/v1/plans/by-area', async (req, res) => {
   }
 });
 
+router.post('/v1/testplans/automation-metrics', async (req, res) => {
+  const testPlans = req.body;
 
+  if (!Array.isArray(testPlans) || testPlans.length === 0) {
+    return res.status(400).json({ error: 'Request body must be a non-empty array of test plans' });
+  }
 
-router.get('/v1/tests/automation', async (req, res) => {
-  const { planId, planNames, areaPaths, cache = 'true' } = req.query;
-
-  const planNamesList = planNames ? String(planNames).split(',') : undefined;
-  const areaPathList = areaPaths ? String(areaPaths).split(',') : undefined;
-
-  const cacheKey = `metrics:automation:${planId || 'all'}:${planNamesList?.join('-') || 'none'}:${areaPathList?.join('-') || 'none'}`;
-
-  if (cache === 'true') {
-    const cached = await redis.get(cacheKey);
-    if (cached) return res.json(JSON.parse(cached));
+  const isValid = testPlans.every(plan => typeof plan.id === 'number' && typeof plan.name === 'string');
+  if (!isValid) {
+    return res.status(400).json({ error: 'Each test plan must have an "id" (number) and "name" (string)' });
   }
 
   try {
-    const result = await getAutomationMetrics(
-      planId ? Number(planId) : undefined,
-      areaPathList,
-      planNamesList
-    );
-
-    await redis.set(cacheKey, JSON.stringify(result), 'EX', 600); // 10min
-
+    const result = await getAutomationMetricsForPlans(testPlans);
     res.json(result);
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
+    console.error('Error in /v1/testplans/automation-metrics:', err);
+    res.status(500).json({ error: 'Failed to fetch automation metrics' });
   }
 });
+
+
 
 router.get('/v1/tests/automation/pass-rate', async (req, res) => {
   const { planIds } = req.query;
@@ -83,69 +65,6 @@ router.get('/v1/tests/automation/pass-rate', async (req, res) => {
   } catch (err: any) {
     console.error(err);
     res.status(500).json({ error: err.message });
-  }
-});
-
-router.get('/v1/teams/bugs-by-sprint', async (req, res) => {
-  const { areaPaths, numSprints} = req.query;
-
-  const areaPathList = areaPaths ? String(areaPaths).split(',') : undefined;
-
-  try {
-    const project = process.env.ADO_PROJECT!;
-    const metrics = await getBugMetricsBySprints(project, areaPathList!, Number(numSprints));
-    res.json(metrics);
-  } catch (err: any) {
-    console.error(err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-router.post('/v1/teams/bug-details', async (req, res) => {
-  try {
-    const { links } = req.body;
-
-    if (!Array.isArray(links) || links.length === 0) {
-      return res.status(400).json({ error: 'It is required a list of links.' });
-    }
-
-    const result = await getBugDetailsFromLinks(links);
-    return res.json(result);
-  } catch (error) {
-    console.error('Error to get bug details', error);
-    return res.status(500).json({ error: 'Error to get bug details' });
-  }
-});
-
-router.post('/v1/teams/bug-leakage', async (req, res) => {
-  try {
-    const { areaPaths } = req.body;
-
-    const result = await getBugLeakageBreakdown(areaPaths);
-    return res.json(result);
-  } catch (error) {
-    console.error('Error to calculate Bug Leakage:', error);
-    return res.status(500).json({ error: 'Error to calculate Bug Leakage:' });
-  }
-});
-
-router.get('/v1/teams/bug-leakage-sprint', async (req, res) => {
-  try {
-
-    const { areaPaths, numSprints} = req.query;
-
-    if (!areaPaths) {
-      return res.status(400).json({ error: 'Parameter "squads" is required.' });
-    }
-
-    const areaPathsList = areaPaths ? String(areaPaths).split(',') : undefined;
-
-    const results = await getBugLeakageBySprint(areaPathsList!, Number(numSprints));
-
-    res.json(results);
-  } catch (error) {
-    console.error('Error to get Bug Leakage:', error);
-    res.status(500).json({ error: 'Internal Error to get Bug Leakage:' });
   }
 });
 

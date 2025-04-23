@@ -3,6 +3,7 @@ import redis from '../cache/redis.js';
 import dayjs from 'dayjs';
 import { SprintBugReport, SprintData } from '../types/bug-metric-types.js';
 import { BugLeakageBySprintResult, LeakEnvDetail } from '../types/leak-types.js';
+import { TeamTestPlans } from '../interfaces/testplans-interface.js';
 
 export async function getAllAreaPaths(project: string) {
   const paths: any = [];
@@ -65,6 +66,68 @@ export async function getTestPlans(project: string) {
     throw err;
   }
 }
+
+export async function getTestPlansByAreaPaths(project: string, areaPaths: string[]): Promise<TeamTestPlans[]> {
+  if (!areaPaths || areaPaths.length === 0) {
+    throw new Error('areaPaths are required');
+  }
+
+  const wiqlQuery = {
+    query: `
+      SELECT [System.Id], [System.Title], [System.AreaPath]
+      FROM WorkItems
+      WHERE [System.WorkItemType] = 'Test Plan'
+      AND [System.AreaPath] IN (${areaPaths.map(path => `'${path.trim()}'`).join(',')})
+      ORDER BY [System.CreatedDate] DESC
+    `
+  };
+
+  try {
+    const wiqlResponse = await azureClient.post(
+      `/${project}/_apis/wit/wiql?api-version=7.1`,
+      wiqlQuery
+    );
+
+    const ids = wiqlResponse.data.workItems.map((wi: any) => wi.id);
+
+    if (ids.length === 0) {
+      return areaPaths.map(area => ({
+        team: area,
+        totalTestPlans: 0,
+        testplans: [],
+      }));
+    }
+
+    const detailsResponse = await azureClient.get(
+      `/_apis/wit/workitems?ids=${ids.join(',')}&fields=System.Id,System.Title,System.AreaPath&api-version=7.1`
+    );
+
+    const rawPlans = detailsResponse.data.value.map((item: any) => ({
+      id: item.id,
+      name: item.fields['System.Title'],
+      areaPath: item.fields['System.AreaPath'],
+    }));
+
+    const grouped: TeamTestPlans[] = areaPaths.map(area => {
+      const plans = rawPlans.filter((p: { areaPath: string; }) => p.areaPath === area);
+      return {
+        team: area,
+        totalTestPlans: plans.length,
+        testplans: plans.map((p: any) => ({
+          id: p.id,
+          name: p.name,
+        })),
+      };
+    });
+
+    return grouped;
+  } catch (err) {
+    console.error('Error getting test plans by area paths using WIQL:', err);
+    throw err;
+  }
+}
+
+
 
 
 export async function getSuites(project: string, planId: number) {
