@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { getBugDetailsFromLinks, getBugLeakageBreakdown, getBugLeakageBySprint, getBugMetricsBySprints, getPassRateFromPlans, getTestPlans} from '../services/azure.service.js';
+import { getBugDetailsFromLinks, getBugLeakageBreakdown, getBugLeakageBySprint, getBugMetricsBySprints } from '../services/azure.service.js';
 
 const router = Router();
 

@@ -1,3 +1,5 @@
+import { NewAutomatedTestsData } from "./sprint-automation-metrics-interface";
+
 export interface TestPlan {
   id: number;
   name: string;
@@ -20,8 +22,13 @@ export interface PlanMetrics {
   manual: number;
   automated: number;
   total: number;
+  totalToBeExecuted: number,
+  totalNotExecuted: number,
   automationCoverage: string;
-  passRate: string;
+  passRate: number;
+  executionCoverage: number
+  newAutomated?: NewAutomatedTestsData,
+  automationGrowth?: number
   categories: {
     name: string;
     manual: number;
@@ -41,8 +48,13 @@ export interface OverallMetrics {
   manual: number;
   automated: number;
   total: number;
+  totalToBeExecuted: number,
+  totalNotExecuted: number,
   automationCoverage: string;
-  passRate: string;
+  passRate: number;
+  executionCoverage: number
+  newAutomated?: NewAutomatedTestsData,
+  automationGrowth?: number
   categories: {
     name: string;
     manual: number;

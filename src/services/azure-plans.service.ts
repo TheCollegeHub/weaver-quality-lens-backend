@@ -1,6 +1,10 @@
 import { AutomationMetricsResponse, PlanMetrics } from "../interfaces/testplans-interface";
 import { azureClient } from '../utils/azureClient.js';
 import { TestPlan } from '../interfaces/testplans-interface.js';
+import { getEffectiveStatus } from "./utils.js";
+import { AutomationStatus } from "../enums/automaton-status.js";
+import { countNewAutomatedInPlan } from "./azure.service.js";
+import { NewAutomatedTestsData } from "../interfaces/sprint-automation-metrics-interface.js";
 const ADO_AUTOMATION_STATUS_FIELD = process.env.ADO_AUTOMATION_STATUS_FIELD
 const ADO_CUSTOM_AUTOMATION_STATUS_FIELD = process.env.ADO_CUSTOM_AUTOMATION_STATUS_FIELD
 const ADO_TESTING_TYPE_FIELD = process.env.ADO_TESTING_TYPE_FIELD
@@ -8,12 +12,11 @@ const ADO_AUTOMATION_TOOLS_FIELD = process.env.ADO_AUTOMATION_TOOLS_FIELD
 const ADO_PROJECT = process.env.ADO_PROJECT!;
 const AZURE_API_VERSION = process.env.AZURE_API_VERSION!;
 
-function isAutomatedStatus(raw: string | undefined | null): boolean {
-  if (!raw) return false;
-  return !/^Not\b/i.test(raw.trim()) && /\bAutomated\b/i.test(raw);
-}
-
-export async function getAutomationMetricsForPlans(testPlans: TestPlan[]): Promise<AutomationMetricsResponse> {
+export async function getAutomationMetricsForPlans(
+  testPlans: TestPlan[],
+  startDate?: string,
+  endDate?: string
+): Promise<AutomationMetricsResponse> {
   const testCaseToPlans = new Map<number, Set<number>>();
   const planNamesMap = new Map<number, string>();
 
@@ -55,16 +58,14 @@ export async function getAutomationMetricsForPlans(testPlans: TestPlan[]): Promi
   const overallLinks = { manual: [] as string[], automated: [] as string[] };
   const overallCategoryMap = new Map<string, { manual: number; automated: number }>();
   const overallToolMap = new Map<string, number>();
+  const overallNewAutomatedLinks: string[] = [];;
   let overallManual = 0, overallAutomated = 0;
+  let overallToBeExecuted = 0, overallNotExecuted = 0;
+  let overallNewAutomated = 0;
 
   for (const item of batchRes.data.value) {
     const id = Number(item.id);
-
-    const rawStatus = item.fields[ADO_CUSTOM_AUTOMATION_STATUS_FIELD!] ??
-                      item.fields[ADO_AUTOMATION_STATUS_FIELD!] ??
-                      '';
-    const status: 'Automated' | 'Manual' = isAutomatedStatus(rawStatus) ? 'Automated' : 'Manual';
-
+    const status: AutomationStatus = getEffectiveStatus(item.fields);
     const category = item.fields[ADO_TESTING_TYPE_FIELD!] || 'Uncategorized';
     const tool = item.fields[ADO_AUTOMATION_TOOLS_FIELD!] || 'UnknownTool';
     const link = `https://dev.azure.com/${process.env.ADO_ORGANIZATION}/${ADO_PROJECT}/_workitems/edit/${id}`;
@@ -74,7 +75,7 @@ export async function getAutomationMetricsForPlans(testPlans: TestPlan[]): Promi
     }
 
     const cat = overallCategoryMap.get(category)!;
-    if (status === 'Automated') {
+    if (status === AutomationStatus.Automated) {
       overallAutomated++;
       overallLinks.automated.push(link);
       cat.automated++;
@@ -93,7 +94,7 @@ export async function getAutomationMetricsForPlans(testPlans: TestPlan[]): Promi
 
       const pm = metricsMap.get(planId)!;
 
-      if (status === 'Automated') {
+      if (status === AutomationStatus.Automated) {
         pm.automated++;
         pm.links.automated.push(link);
       } else {
@@ -123,7 +124,28 @@ export async function getAutomationMetricsForPlans(testPlans: TestPlan[]): Promi
     }));
 
     const passedCount = results.filter(o => o === 'Passed').length;
-    pm.passRate = results.length ? ((passedCount / results.length) * 100).toFixed(2) : '0.00';
+    const notExecutedCount = results.filter(o => o === 'Unspecified').length;
+    const executedResults = results.filter(o => o !== 'Unspecified').length;
+
+    pm.executionCoverage = results.length ? parseFloat(((executedResults / results.length) * 100).toFixed(2)) : 0.00;
+    pm.passRate = executedResults
+      ? parseFloat(((passedCount / executedResults) * 100).toFixed(2))
+      : 0.00;
+
+    pm.totalToBeExecuted = results.length;
+    pm.totalNotExecuted = notExecutedCount;
+    overallToBeExecuted += results.length;
+    overallNotExecuted += notExecutedCount;
+
+    if (startDate && endDate) {
+      const newAutomatedData: NewAutomatedTestsData = await countNewAutomatedInPlan(pm.planId, new Date(startDate), new Date(endDate));
+      pm.newAutomated = newAutomatedData;
+      overallNewAutomatedLinks.push(...newAutomatedData.links)
+      pm.automationGrowth= pm.automated
+        ? parseFloat(((newAutomatedData.count / pm.total) * 100).toFixed(2))
+        : 0.00;
+      overallNewAutomated += newAutomatedData.count;
+    }
 
     plans.push(pm);
   }));
@@ -131,29 +153,43 @@ export async function getAutomationMetricsForPlans(testPlans: TestPlan[]): Promi
   const overallTotal = overallManual + overallAutomated;
   const categories = Array.from(overallCategoryMap, ([name, v]) => ({ name, ...v }));
   const tools = Array.from(overallToolMap, ([name, total]) => ({ name, total }));
+  const overalAutomationGrowth = overallNewAutomated
+    ? parseFloat(((overallNewAutomated / overallTotal) * 100).toFixed(2))
+    : 0.00;
 
   return {
     overall: {
       manual: overallManual,
       automated: overallAutomated,
       total: overallTotal,
+      totalToBeExecuted: overallToBeExecuted,
+      totalNotExecuted: overallNotExecuted,
       automationCoverage: overallTotal ? ((overallAutomated / overallTotal) * 100).toFixed(2) : '0.00',
-      passRate: plans.length ? (plans.reduce((sum, p) => sum + parseFloat(p.passRate), 0) / plans.length).toFixed(2) : '0.00',
+      passRate: plans.length ? parseFloat((plans.reduce((sum, p) => sum + p.passRate, 0) / plans.length).toFixed(2)) : 0.00,
+      executionCoverage: plans.length ? parseFloat((plans.reduce((sum, p) => sum + p.executionCoverage, 0) / plans.length).toFixed(2)) : 0.00,
+      ...(startDate && endDate
+        ? {
+            newAutomated: { count: overallNewAutomated , links: overallNewAutomatedLinks},
+            automationGrowth: overalAutomationGrowth,
+          }
+        : {}),
       categories,
       tools,
-      links: overallLinks
+      links: overallLinks,
     },
     plans
   };
 }
 
 
+
+
 function emptyOverall(): AutomationMetricsResponse['overall'] {
-  return { manual: 0, automated: 0, total: 0, automationCoverage: '0.00', passRate: '0.00', categories: [], tools: [], links: { manual: [], automated: [] } };
+  return { manual: 0, automated: 0, total: 0, totalToBeExecuted: 0, totalNotExecuted: 0, automationCoverage: '0.00', passRate: 0.00, executionCoverage: 0.00, newAutomated: {count: 0, links: []}, automationGrowth: 0.00, categories: [], tools: [], links: { manual: [], automated: [] } };
 }
 
 function emptyPlan(id: number, name: string): PlanMetrics {
-  return { planId: id, planName: name, manual: 0, automated: 0, total: 0, automationCoverage: '0.00', passRate: '0.00', categories: [], tools: [], links: { manual: [], automated: [] } };
+  return { planId: id, planName: name, manual: 0, automated: 0, total: 0, totalToBeExecuted: 0, totalNotExecuted: 0, automationCoverage: '0.00', newAutomated: {count: 0, links: []}, automationGrowth: 0.00 , passRate: 0.00, executionCoverage: 0.00 , categories: [], tools: [], links: { manual: [], automated: [] } };
 }
 
 function upsertCategory(arr: any[], name: string, status: string) {

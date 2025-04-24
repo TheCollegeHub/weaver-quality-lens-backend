@@ -4,6 +4,17 @@ import dayjs from 'dayjs';
 import { SprintBugReport, SprintData } from '../types/bug-metric-types.js';
 import { BugLeakageBySprintResult, LeakEnvDetail } from '../types/leak-types.js';
 import { TeamTestPlans } from '../interfaces/testplans-interface.js';
+import { NewAutomatedTestsData, SprintMetrics } from '../interfaces/sprint-automation-metrics-interface.js';
+import { getEffectiveStatus } from './utils.js';
+import { TestPlan } from '../interfaces/testplans-interface.js'
+import { getAutomationMetricsForPlans } from './azure-plans.service.js';
+import { AutomationStatus } from '../enums/automaton-status.js';
+
+const ADO_PROJECT = process.env.ADO_PROJECT
+const ADO_ORGANIZATION = process.env.ADO_ORGANIZATION
+const AZURE_API_VERSION = process.env.AZURE_API_VERSION
+const ADO_CUSTOM_AUTOMATION_STATUS_FIELD = process.env.ADO_CUSTOM_AUTOMATION_STATUS_FIELD
+const ADO_AUTOMATION_STATUS_FIELD  = process.env.ADO_AUTOMATION_STATUS_FIELD
 
 export async function getAllAreaPaths(project: string) {
   const paths: any = [];
@@ -128,8 +139,6 @@ export async function getTestPlansByAreaPaths(project: string, areaPaths: string
 }
 
 
-
-
 export async function getSuites(project: string, planId: number) {
   const res = await azureClient.get(`/${project}/_apis/testplan/plans/${planId}/suites?api-version=${process.env.AZURE_API_VERSION}`);
   return res.data.value || [];
@@ -204,33 +213,33 @@ export async function getAutomationMetrics(
   };
 }
 
-export async function getPassRateFromPlans(plans: any[], project: string) {
-  const allResults = [];
-  for (const plan of plans) {
-    const url = `/${project}/_apis/testplan/plans/${plan.id}/suites?api-version=${process.env.AZURE_API_VERSION}`;
-    const suitesRes = await azureClient.get(url);
-    const suites = suitesRes.data.value;
+// export async function getPassRateFromPlans(plans: any[], project: string) {
+//   const allResults = [];
+//   for (const plan of plans) {
+//     const url = `/${project}/_apis/testplan/plans/${plan.id}/suites?api-version=${process.env.AZURE_API_VERSION}`;
+//     const suitesRes = await azureClient.get(url);
+//     const suites = suitesRes.data.value;
 
-    for (const suite of suites) {
-      const pointsUrl = `/${project}/_apis/test/plans/${plan.id}/suites/${suite.id}/points?api-version=${process.env.AZURE_API_VERSION}`;
-      const pointsRes = await azureClient.get(pointsUrl);
-      const points = pointsRes.data.value;
-      allResults.push(...points.map((p: { outcome: any; testCase: { id: any; }; }) => ({
-        outcome: p.outcome,
-        testCaseId: p.testCase.id
-      })));
-    }
-  }
+//     for (const suite of suites) {
+//       const pointsUrl = `/${project}/_apis/test/plans/${plan.id}/suites/${suite.id}/points?api-version=${process.env.AZURE_API_VERSION}`;
+//       const pointsRes = await azureClient.get(pointsUrl);
+//       const points = pointsRes.data.value;
+//       allResults.push(...points.map((p: { outcome: any; testCase: { id: any; }; }) => ({
+//         outcome: p.outcome,
+//         testCaseId: p.testCase.id
+//       })));
+//     }
+//   }
 
-  const total = allResults.length;
-  const passed = allResults.filter(p => p.outcome === 'Passed').length;
+//   const total = allResults.length;
+//   const passed = allResults.filter(p => p.outcome === 'Passed').length;
 
-  return {
-    total,
-    passed,
-    passRate: total > 0 ? (passed / total * 100).toFixed(2) : '0.00'
-  };
-}
+//   return {
+//     total,
+//     passed,
+//     passRate: total > 0 ? (passed / total * 100).toFixed(2) : '0.00'
+//   };
+// }
 
 const getPastSprintsByTeamSettings= async (project: string, numSprints: number): Promise<SprintData[]> => {
   const apiVersion = process.env.AZURE_API_VERSION;
@@ -304,7 +313,6 @@ const getPastSprintsByClassificationNodes = async (project: string, areaPaths: s
 export async function getBugMetricsBySprints(project: string, areaPaths: string[], numSprints: number): Promise<SprintBugReport> {
   const apiVersion = process.env.AZURE_API_VERSION;
   const pastSprints = await getPastSprintsByTeamSettings(project, numSprints);
-  console.log(pastSprints)
   const teamsBugs: SprintBugReport['teams'] = [];
   const sprintOveralls: SprintBugReport['sprintOveralls'] = [];
 
@@ -575,9 +583,6 @@ export async function getBugMetricsBySprints(project: string, areaPaths: string[
   };
 }
 
-
-
-
 export async function getBugDetailsFromLinks(links: string[]) {
   const apiVersion = process.env.AZURE_API_VERSION;
 
@@ -644,7 +649,6 @@ export async function getBugDetailsFromLinks(links: string[]) {
 
   return bugDetails;
 }
-
 
 export async function getBugLeakageBreakdown(areaPaths: string[]) {
   const apiVersion = process.env.AZURE_API_VERSION;
@@ -965,6 +969,207 @@ export async function getBugLeakageBySprint(areaPaths: string[], numSprints: num
 
   return results;
 }
+
+export const getSprintTestMetrics = async (areaPaths: string[], numSprints: number) => {
+  const allSprintMetrics: Record<string, SprintMetrics[]> = {};
+  const overallAccumulator: SprintMetrics[] = [];
+
+  for (const areaPath of areaPaths) {
+    const sprints = await getPastSprintsByTeamSettings(ADO_PROJECT!, numSprints);
+    const metricsPerSprint: SprintMetrics[] = [];
+
+    for (const sprint of sprints) {
+      const data = await getTestPlanData(areaPath, sprint.iterationPath);
+
+      const metric: SprintMetrics = {
+        sprintName: sprint.name,
+        planName: data.metrics.plans[0].planName,
+        totalTestCases: data.metrics.overall.total,
+        totalTestCasesBeExecuted: data.metrics.overall.totalToBeExecuted,
+        totalTestCasesNotExecuted: data.metrics.overall.totalNotExecuted,
+        passRate: data.metrics.overall.passRate,
+        executionCoverage: data.metrics.overall.executionCoverage,
+        manualTests: data.metrics.overall.manual,
+        automatedTests: data.metrics.overall.automated,
+      };
+
+      metricsPerSprint.push(metric);
+      overallAccumulator.push(metric);
+    }
+
+    allSprintMetrics[areaPath] = metricsPerSprint;
+  }
+
+  const sprintsOverall: Record<string, SprintMetrics> = {};
+  for (const metrics of Object.values(allSprintMetrics)) {
+    for (const m of metrics) {
+      if (!sprintsOverall[m.sprintName]) {
+        sprintsOverall[m.sprintName] = { ...m };
+      } else {
+        const s = sprintsOverall[m.sprintName];
+        s.totalTestCases += m.totalTestCases;
+        s.totalTestCasesBeExecuted += m.totalTestCasesBeExecuted;
+        s.totalTestCasesNotExecuted += m.totalTestCasesNotExecuted;
+        s.passRate = (s.passRate + m.passRate) / 2;
+        s.executionCoverage += m.executionCoverage
+        s.manualTests += m.manualTests;
+        s.automatedTests += m.automatedTests;
+      }
+    }
+  }
+
+  const overall: SprintMetrics = overallAccumulator.reduce((acc, m, i) => {
+    acc.totalTestCases += m.totalTestCases;
+    acc.totalTestCasesBeExecuted += m.totalTestCasesBeExecuted;
+    acc.totalTestCasesNotExecuted += m.totalTestCasesNotExecuted;
+    acc.passRate += m.passRate;
+    acc.executionCoverage += m.executionCoverage
+    acc.manualTests += m.manualTests;
+    acc.automatedTests += m.automatedTests;
+    return acc;
+  }, {
+    sprintName: 'Overall',
+    planName: 'Overall',
+    totalTestCases: 0,
+    totalTestCasesBeExecuted: 0,
+    totalTestCasesNotExecuted: 0,
+    passRate: 0,
+    executionCoverage: 0,
+    manualTests: 0,
+    automatedTests: 0,
+  });
+
+  overall.passRate = parseFloat((overall.passRate / overallAccumulator.length).toFixed(2));
+
+  return {
+    teams: areaPaths.map(area => ({
+      areaPath: area,
+      sprints: allSprintMetrics[area],
+    })),
+    sprintsOverall,
+    overall
+  };
+};
+
+export async function getTestPlanData(
+  areaPath: string,
+  iterationPath: string
+) {
+
+  const wiql = {
+    query: `
+      SELECT [System.Id]
+      FROM workitems
+      WHERE
+        [System.TeamProject] = '${decodeURIComponent(ADO_PROJECT!)}'
+        AND [System.WorkItemType] = 'Test Plan'
+        AND [System.AreaPath] UNDER '${areaPath}'
+        AND [System.IterationPath] = '${iterationPath}'
+      ORDER BY [System.ChangedDate] DESC
+    `,
+  };
+
+  const wiqlRes = await azureClient.post(
+    `/${ADO_PROJECT}/_apis/wit/wiql?api-version=${AZURE_API_VERSION}`,
+    wiql
+  );
+
+  const planId = wiqlRes.data.workItems?.[0]?.id;
+  if (!planId) throw new Error(`No Test Plan found for ${areaPath} @ ${iterationPath}`);
+
+  const planWorkItemRes = await azureClient.get(
+    `/_apis/wit/workitems/${planId}?fields=System.Title&api-version=${AZURE_API_VERSION}`
+  );
+
+  const plan: TestPlan = {
+    id: wiqlRes.data.workItems?.[0]?.id,
+    name: planWorkItemRes.data.fields['System.Title']
+  }
+
+  const testPlans: TestPlan[] = [];
+  testPlans.push(plan)
+  const responseTestPlanMetrics = await getAutomationMetricsForPlans(testPlans);
+
+  return {
+    plan, 
+    metrics: responseTestPlanMetrics,
+  };
+};
+
+export async function countNewAutomatedInPlan(
+  planId: number,
+  startDate: Date,
+  endDate: Date
+): Promise<NewAutomatedTestsData> {
+  const suitesRes = await azureClient.get(
+    `/${ADO_PROJECT}/_apis/testplan/plans/${planId}/suites?api-version=${AZURE_API_VERSION}`
+  );
+  const suites: any[] = suitesRes.data.value;
+
+  const allTestCaseIds = new Set<number>();
+
+  await Promise.all(
+    suites.map(async (suite) => {
+      const casesRes = await azureClient.get(
+        `/${ADO_PROJECT}/_apis/test/plans/${planId}/suites/${suite.id}/testcases?api-version=${AZURE_API_VERSION}`
+      );
+      for (const tc of casesRes.data.value) {
+        allTestCaseIds.add(Number(tc.testCase.id));
+      }
+    })
+  );
+
+  const automatedTestCaseIds: number[] = [];
+
+  await Promise.all(
+    Array.from(allTestCaseIds).map(async (testCaseId) => {
+      const wiRes = await azureClient.get(
+        `/${ADO_PROJECT}/_apis/wit/workitems/${testCaseId}?fields=${ADO_AUTOMATION_STATUS_FIELD},${ADO_CUSTOM_AUTOMATION_STATUS_FIELD}&api-version=${AZURE_API_VERSION}`
+      );
+      const fields = wiRes.data.fields;
+      const status: AutomationStatus = getEffectiveStatus(fields);
+
+      if (status === AutomationStatus.Automated) {
+        automatedTestCaseIds.push(testCaseId);
+      }
+    })
+  );
+
+  let count = 0;
+  const links: string[] = [];
+
+  await Promise.all(
+    automatedTestCaseIds.map(async (testCaseId) => {
+      const revRes = await azureClient.get(
+        `/${ADO_PROJECT}/_apis/wit/workitems/${testCaseId}/revisions?api-version=${AZURE_API_VERSION}`
+      );
+      const revisions = revRes.data.value;
+
+      for (let i = 1; i < revisions.length; i++) {
+        const prevStatus = getEffectiveStatus(revisions[i - 1].fields);
+        const currStatus = getEffectiveStatus(revisions[i].fields);
+        const changedAt = new Date(revisions[i].fields['System.ChangedDate']);
+
+        if (
+          changedAt >= startDate &&
+          changedAt <= endDate &&
+          prevStatus !== AutomationStatus.Automated &&
+          currStatus === AutomationStatus.Automated
+        ) {
+          count++;
+          links.push(`https://dev.azure.com/${ADO_ORGANIZATION}/${ADO_PROJECT}/_workitems/edit/${testCaseId}`);
+          break;
+        }
+      }
+    })
+  );
+
+  return { count, links };
+}
+
+
+
+
 
 
 
