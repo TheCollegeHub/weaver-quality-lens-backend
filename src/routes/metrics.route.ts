@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { countNewAutomatedInPlan, getSprintTestMetrics, getTestPlansByAreaPaths } from '../services/azure.service.js';
-import { getAutomationMetricsForPlans } from '../services/azure-plans.service.js';
+import { getAutomationCoveragePerSuite, getAutomationMetricsForPlans } from '../services/azure-plans.service.js';
 import { TestPlan } from '../interfaces/testplans-interface.js';
 import { NewAutomatedTestsData } from '../interfaces/sprint-automation-metrics-interface.js';
 
@@ -114,26 +114,22 @@ router.post('/v1/testplans/new-automations', async (req, res) => {
   }
 });
 
+router.post('/v1/testplans/suites/coverage', async (req, res) => {
+  try {
+    const { plans }: { plans: TestPlan[] } = req.body;
 
-// router.get('/v1/tests/automation/pass-rate', async (req, res) => {
-//   const { planIds } = req.query;
-//   if (!planIds) {
-//     return res.status(400).json({ error: 'planIds is required' });
-//   }
+    console.log()
+    if (!Array.isArray(plans) || plans.length === 0) {
+      return res.status(400).json({ message: 'Missing or invalid "plans".' });
+    }
 
-//   const planIdList = String(planIds).split(',').map(Number);
-//   const project = process.env.ADO_PROJECT!;
+    const data = await getAutomationCoveragePerSuite(plans);
 
-//   try {
-//     const allPlans = await getTestPlans(project);
-//     const selectedPlans = allPlans.filter((p: { id: number; }) => planIdList.includes(p.id));
-
-//     const passRate = await getPassRateFromPlans(selectedPlans, project);
-//     res.json(passRate);
-//   } catch (err: any) {
-//     console.error(err);
-//     res.status(500).json({ error: err.message });
-//   }
-// });
+    return res.json(data);
+  } catch (error: any) {
+    console.error('Error in /v1/testplans/coverage-by-suite:', error);
+    return res.status(500).json({ message: 'Internal Server Error', error: error.message });
+  }
+});
 
 export default router;

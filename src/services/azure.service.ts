@@ -1000,23 +1000,26 @@ export const getSprintTestMetrics = async (areaPaths: string[], numSprints: numb
     allSprintMetrics[areaPath] = metricsPerSprint;
   }
 
-  const sprintsOverall: Record<string, SprintMetrics> = {};
+  const sprintsMap: Map<string, SprintMetrics> = new Map();
+
   for (const metrics of Object.values(allSprintMetrics)) {
     for (const m of metrics) {
-      if (!sprintsOverall[m.sprintName]) {
-        sprintsOverall[m.sprintName] = { ...m };
+      if (!sprintsMap.has(m.sprintName)) {
+        sprintsMap.set(m.sprintName, { ...m });
       } else {
-        const s = sprintsOverall[m.sprintName];
+        const s = sprintsMap.get(m.sprintName)!;
         s.totalTestCases += m.totalTestCases;
         s.totalTestCasesBeExecuted += m.totalTestCasesBeExecuted;
         s.totalTestCasesNotExecuted += m.totalTestCasesNotExecuted;
         s.passRate = (s.passRate + m.passRate) / 2;
-        s.executionCoverage += m.executionCoverage
+        s.executionCoverage += m.executionCoverage;
         s.manualTests += m.manualTests;
         s.automatedTests += m.automatedTests;
       }
     }
   }
+  
+  const sprintsOverall: SprintMetrics[] = Array.from(sprintsMap.values());
 
   const overall: SprintMetrics = overallAccumulator.reduce((acc, m, i) => {
     acc.totalTestCases += m.totalTestCases;
@@ -1040,6 +1043,7 @@ export const getSprintTestMetrics = async (areaPaths: string[], numSprints: numb
   });
 
   overall.passRate = parseFloat((overall.passRate / overallAccumulator.length).toFixed(2));
+  overall.executionCoverage = parseFloat((overall.executionCoverage / overallAccumulator.length).toFixed(2));
 
   return {
     teams: areaPaths.map(area => ({

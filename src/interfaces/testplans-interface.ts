@@ -74,3 +74,23 @@ export interface AutomationMetricsResponse {
   overall: OverallMetrics;
   plans: PlanMetrics[];
 }
+
+export interface SuiteAutomationCoverage {
+  suiteId: number;
+  suiteName: string;
+  manual: number;
+  automated: number;
+  total: number;
+  automationCoverage: string;
+}
+
+export interface PlanAutomationCoverage {
+  planId: number;
+  planName: string;
+  totalManual: number;
+  totalAutomated: number;
+  totalTests: number;
+  totalCoverage: string;
+  suites: SuiteAutomationCoverage[];
+}
+

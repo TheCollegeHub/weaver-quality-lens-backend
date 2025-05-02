@@ -17,7 +17,7 @@ sprints: SprintMetrics[];
 
 export interface MetricsResponse {
 teams: TeamMetrics[];
-sprintsOverall: Record<string, SprintMetrics>;
+sprintsOverall: SprintMetrics[];
 overall: SprintMetrics; 
 };
 

@@ -1,4 +1,4 @@
-import { AutomationMetricsResponse, PlanMetrics } from "../interfaces/testplans-interface";
+import { AutomationMetricsResponse, PlanAutomationCoverage, PlanMetrics, SuiteAutomationCoverage } from "../interfaces/testplans-interface";
 import { azureClient } from '../utils/azureClient.js';
 import { TestPlan } from '../interfaces/testplans-interface.js';
 import { getEffectiveStatus } from "./utils.js";
@@ -181,6 +181,92 @@ export async function getAutomationMetricsForPlans(
   };
 }
 
+export async function getAutomationCoveragePerSuite(
+  testPlans: TestPlan[]
+): Promise<PlanAutomationCoverage[]> {
+  const coverage: PlanAutomationCoverage[] = [];
+
+  for (const { id: planId, name: planName } of testPlans) {
+    const suitesRes = await azureClient.get(
+      `/${ADO_PROJECT}/_apis/testplan/plans/${planId}/suites?api-version=${AZURE_API_VERSION}`
+    );
+
+    const suites: SuiteAutomationCoverage[] = [];
+    let totalManual = 0;
+    let totalAutomated = 0;
+    const uniqueTestCaseIds = new Set<number>();
+
+    for (const suite of suitesRes.data.value) {
+      const casesRes = await azureClient.get(
+        `/${ADO_PROJECT}/_apis/test/plans/${planId}/suites/${suite.id}/testcases?api-version=${AZURE_API_VERSION}`
+      );
+
+      const testCaseIds: number[] = casesRes.data.value.map((tc: any) => Number(tc.testCase.id));
+      const newTestCaseIds = testCaseIds.filter(id => !uniqueTestCaseIds.has(id));
+
+      if (!newTestCaseIds.length) continue;
+
+      const batchRes = await azureClient.post(
+        `/_apis/wit/workitemsbatch?api-version=${AZURE_API_VERSION}`,
+        {
+          ids: newTestCaseIds,
+          fields: [
+            ADO_AUTOMATION_STATUS_FIELD,
+            ADO_CUSTOM_AUTOMATION_STATUS_FIELD
+          ]
+        }
+      );
+
+      let suiteManual = 0;
+      let suiteAutomated = 0;
+
+      for (const item of batchRes.data.value) {
+        const status: AutomationStatus = getEffectiveStatus(item.fields);
+        uniqueTestCaseIds.add(item.id);
+
+        if (status === AutomationStatus.Automated) {
+          suiteAutomated++;
+        } else {
+          suiteManual++;
+        }
+      }
+
+      const suiteTotal = suiteManual + suiteAutomated;
+      const automationCoverage = suiteTotal
+        ? ((suiteAutomated / suiteTotal) * 100).toFixed(2)
+        : '0.00';
+
+      suites.push({
+        suiteId: suite.id,
+        suiteName: suite.name,
+        manual: suiteManual,
+        automated: suiteAutomated,
+        total: suiteTotal,
+        automationCoverage
+      });
+
+      totalManual += suiteManual;
+      totalAutomated += suiteAutomated;
+    }
+
+    const totalTests = totalManual + totalAutomated;
+    const totalCoverage = totalTests
+      ? ((totalAutomated / totalTests) * 100).toFixed(2)
+      : '0.00';
+
+    coverage.push({
+      planId,
+      planName,
+      totalManual,
+      totalAutomated,
+      totalTests,
+      totalCoverage: `${totalCoverage}%`,
+      suites
+    });
+  }
+
+  return coverage;
+}
 
 
 
