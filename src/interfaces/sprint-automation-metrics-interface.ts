@@ -3,6 +3,7 @@ export interface SprintMetrics {
     planName: string;
     totalTestCases: number;
     totalTestCasesBeExecuted: number;
+    totalTestCasesExecuted: number;
     totalTestCasesNotExecuted: number;
     passRate: number;
     executionCoverage: number,

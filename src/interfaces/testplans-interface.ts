@@ -81,7 +81,7 @@ export interface SuiteAutomationCoverage {
   manual: number;
   automated: number;
   total: number;
-  automationCoverage: string;
+  automationCoverage: number;
 }
 
 export interface PlanAutomationCoverage {
@@ -90,7 +90,7 @@ export interface PlanAutomationCoverage {
   totalManual: number;
   totalAutomated: number;
   totalTests: number;
-  totalCoverage: string;
+  totalCoverage: number;
   suites: SuiteAutomationCoverage[];
 }
 

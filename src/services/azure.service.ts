@@ -986,6 +986,7 @@ export const getSprintTestMetrics = async (areaPaths: string[], numSprints: numb
         planName: data.metrics.plans[0].planName,
         totalTestCases: data.metrics.overall.total,
         totalTestCasesBeExecuted: data.metrics.overall.totalToBeExecuted,
+        totalTestCasesExecuted: data.metrics.overall.totalToBeExecuted - data.metrics.overall.totalNotExecuted,
         totalTestCasesNotExecuted: data.metrics.overall.totalNotExecuted,
         passRate: data.metrics.overall.passRate,
         executionCoverage: data.metrics.overall.executionCoverage,
@@ -1010,6 +1011,7 @@ export const getSprintTestMetrics = async (areaPaths: string[], numSprints: numb
         const s = sprintsMap.get(m.sprintName)!;
         s.totalTestCases += m.totalTestCases;
         s.totalTestCasesBeExecuted += m.totalTestCasesBeExecuted;
+        s.totalTestCasesExecuted += m.totalTestCasesBeExecuted - m.totalTestCasesNotExecuted;
         s.totalTestCasesNotExecuted += m.totalTestCasesNotExecuted;
         s.passRate = (s.passRate + m.passRate) / 2;
         s.executionCoverage += m.executionCoverage;
@@ -1024,6 +1026,7 @@ export const getSprintTestMetrics = async (areaPaths: string[], numSprints: numb
   const overall: SprintMetrics = overallAccumulator.reduce((acc, m, i) => {
     acc.totalTestCases += m.totalTestCases;
     acc.totalTestCasesBeExecuted += m.totalTestCasesBeExecuted;
+    acc.totalTestCasesExecuted += m.totalTestCasesBeExecuted - m.totalTestCasesNotExecuted;
     acc.totalTestCasesNotExecuted += m.totalTestCasesNotExecuted;
     acc.passRate += m.passRate;
     acc.executionCoverage += m.executionCoverage
@@ -1035,6 +1038,7 @@ export const getSprintTestMetrics = async (areaPaths: string[], numSprints: numb
     planName: 'Overall',
     totalTestCases: 0,
     totalTestCasesBeExecuted: 0,
+    totalTestCasesExecuted: 0,
     totalTestCasesNotExecuted: 0,
     passRate: 0,
     executionCoverage: 0,

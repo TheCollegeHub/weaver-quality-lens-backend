@@ -233,8 +233,8 @@ export async function getAutomationCoveragePerSuite(
 
       const suiteTotal = suiteManual + suiteAutomated;
       const automationCoverage = suiteTotal
-        ? ((suiteAutomated / suiteTotal) * 100).toFixed(2)
-        : '0.00';
+        ? parseFloat(((suiteAutomated / suiteTotal) * 100).toFixed(2))
+        : 0.00;
 
       suites.push({
         suiteId: suite.id,
@@ -251,8 +251,8 @@ export async function getAutomationCoveragePerSuite(
 
     const totalTests = totalManual + totalAutomated;
     const totalCoverage = totalTests
-      ? ((totalAutomated / totalTests) * 100).toFixed(2)
-      : '0.00';
+      ? parseFloat(((totalAutomated / totalTests) * 100).toFixed(2))
+      : 0.00;
 
     coverage.push({
       planId,
@@ -260,7 +260,7 @@ export async function getAutomationCoveragePerSuite(
       totalManual,
       totalAutomated,
       totalTests,
-      totalCoverage: `${totalCoverage}%`,
+      totalCoverage: totalCoverage,
       suites
     });
   }
