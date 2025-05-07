@@ -9,6 +9,8 @@ import { getEffectiveStatus } from './utils.js';
 import { TestPlan } from '../interfaces/testplans-interface.js'
 import { getAutomationMetricsForPlans } from './azure-plans.service.js';
 import { AutomationStatus } from '../enums/automaton-status.js';
+import _ from "lodash";
+const CHUNK_SIZE = 200;
 
 const ADO_PROJECT = process.env.ADO_PROJECT
 const ADO_ORGANIZATION = process.env.ADO_ORGANIZATION
@@ -78,7 +80,10 @@ export async function getTestPlans(project: string) {
   }
 }
 
-export async function getTestPlansByAreaPaths(project: string, areaPaths: string[]): Promise<TeamTestPlans[]> {
+export async function getTestPlansByAreaPaths(
+  project: string,
+  areaPaths: string[]
+): Promise<TeamTestPlans[]> {
   if (!areaPaths || areaPaths.length === 0) {
     throw new Error('areaPaths are required');
   }
@@ -90,7 +95,7 @@ export async function getTestPlansByAreaPaths(project: string, areaPaths: string
       WHERE [System.WorkItemType] = 'Test Plan'
       AND [System.AreaPath] IN (${areaPaths.map(path => `'${path.trim()}'`).join(',')})
       ORDER BY [System.CreatedDate] DESC
-    `
+    `,
   };
 
   try {
@@ -109,22 +114,28 @@ export async function getTestPlansByAreaPaths(project: string, areaPaths: string
       }));
     }
 
-    const detailsResponse = await azureClient.get(
-      `/_apis/wit/workitems?ids=${ids.join(',')}&fields=System.Id,System.Title,System.AreaPath&api-version=7.1`
+    const idChunks = _.chunk(ids, CHUNK_SIZE);
+    const detailPromises = idChunks.map(chunkIds =>
+      azureClient.get(
+        `/_apis/wit/workitems?ids=${chunkIds.join(',')}&fields=System.Id,System.Title,System.AreaPath&api-version=7.1`
+      )
     );
 
-    const rawPlans = detailsResponse.data.value.map((item: any) => ({
-      id: item.id,
-      name: item.fields['System.Title'],
-      areaPath: item.fields['System.AreaPath'],
-    }));
+    const detailResponses = await Promise.all(detailPromises);
+    const rawPlans = detailResponses.flatMap((res: { data: { value: any[]; }; }) =>
+      res.data.value.map((item: any) => ({
+        id: item.id,
+        name: item.fields['System.Title'],
+        areaPath: item.fields['System.AreaPath'],
+      }))
+    );
 
     const grouped: TeamTestPlans[] = areaPaths.map(area => {
-      const plans = rawPlans.filter((p: { areaPath: string; }) => p.areaPath === area);
+      const plans = rawPlans.filter((p: any)  => p.areaPath === area);
       return {
         team: area,
         totalTestPlans: plans.length,
-        testplans: plans.map((p: any) => ({
+        testplans: plans.map((p: TestPlan) => ({
           id: p.id,
           name: p.name,
         })),
@@ -212,34 +223,6 @@ export async function getAutomationMetrics(
     plansChecked: plans.map((p: { name: string; }) => p.name),
   };
 }
-
-// export async function getPassRateFromPlans(plans: any[], project: string) {
-//   const allResults = [];
-//   for (const plan of plans) {
-//     const url = `/${project}/_apis/testplan/plans/${plan.id}/suites?api-version=${process.env.AZURE_API_VERSION}`;
-//     const suitesRes = await azureClient.get(url);
-//     const suites = suitesRes.data.value;
-
-//     for (const suite of suites) {
-//       const pointsUrl = `/${project}/_apis/test/plans/${plan.id}/suites/${suite.id}/points?api-version=${process.env.AZURE_API_VERSION}`;
-//       const pointsRes = await azureClient.get(pointsUrl);
-//       const points = pointsRes.data.value;
-//       allResults.push(...points.map((p: { outcome: any; testCase: { id: any; }; }) => ({
-//         outcome: p.outcome,
-//         testCaseId: p.testCase.id
-//       })));
-//     }
-//   }
-
-//   const total = allResults.length;
-//   const passed = allResults.filter(p => p.outcome === 'Passed').length;
-
-//   return {
-//     total,
-//     passed,
-//     passRate: total > 0 ? (passed / total * 100).toFixed(2) : '0.00'
-//   };
-// }
 
 const getPastSprintsByTeamSettings= async (project: string, numSprints: number): Promise<SprintData[]> => {
   const apiVersion = process.env.AZURE_API_VERSION;
@@ -366,9 +349,8 @@ export async function getBugMetricsBySprints(project: string, areaPaths: string[
 
       if (ids.length) {
         const batches = [];
-        const batchSize = 200;
-        for (let i = 0; i < ids.length; i += batchSize) {
-          batches.push(ids.slice(i, i + batchSize));
+        for (let i = 0; i < ids.length; i += CHUNK_SIZE) {
+          batches.push(ids.slice(i, i + CHUNK_SIZE));
         }
 
         for (const batch of batches) {
@@ -601,10 +583,9 @@ export async function getBugDetailsFromLinks(links: string[]) {
     .filter((id): id is number => id !== null);
 
   // 2) split into batches of 200
-  const batchSize = 200;
   const batches: number[][] = [];
-  for (let i = 0; i < bugIds.length; i += batchSize) {
-    batches.push(bugIds.slice(i, i + batchSize));
+  for (let i = 0; i < bugIds.length; i += CHUNK_SIZE) {
+    batches.push(bugIds.slice(i, i + CHUNK_SIZE));
   }
 
   // 3) fetch each batch and assemble details
@@ -692,9 +673,8 @@ export async function getBugLeakageBreakdown(areaPaths: string[]) {
       let preProdCount = 0;
 
       if (ids.length) {
-        const batchSize = 200;
-        for (let i = 0; i < ids.length; i += batchSize) {
-          const batch = ids.slice(i, i + batchSize);
+        for (let i = 0; i < ids.length; i += CHUNK_SIZE) {
+          const batch = ids.slice(i, i + CHUNK_SIZE);
 
           const detailRes = await azureClient.post(`/_apis/wit/workitemsbatch?api-version=7.1`, {
             ids: batch,
@@ -851,9 +831,8 @@ export async function getBugLeakageBySprint(areaPaths: string[], numSprints: num
       let preProdCount = 0;
 
       if (ids.length) {
-        const batchSize = 200;
-        for (let i = 0; i < ids.length; i += batchSize) {
-          const batch = ids.slice(i, i + batchSize);
+        for (let i = 0; i < ids.length; i += CHUNK_SIZE) {
+          const batch = ids.slice(i, i + CHUNK_SIZE);
           const detailRes = await azureClient.post(
             `/_apis/wit/workitemsbatch?api-version=7.1`,
             {
@@ -1059,11 +1038,7 @@ export const getSprintTestMetrics = async (areaPaths: string[], numSprints: numb
   };
 };
 
-export async function getTestPlanData(
-  areaPath: string,
-  iterationPath: string
-) {
-
+export async function getTestPlanData(areaPath: string, iterationPath: string) {
   const wiql = {
     query: `
       SELECT [System.Id]
@@ -1077,32 +1052,63 @@ export async function getTestPlanData(
     `,
   };
 
+  // Executa a consulta WIQL para obter IDs
   const wiqlRes = await azureClient.post(
     `/${ADO_PROJECT}/_apis/wit/wiql?api-version=${AZURE_API_VERSION}`,
     wiql
   );
 
-  const planId = wiqlRes.data.workItems?.[0]?.id;
-  if (!planId) throw new Error(`No Test Plan found for ${areaPath} @ ${iterationPath}`);
+  const workItemIds: number[] = wiqlRes.data.workItems?.map((w: any) => w.id) ?? [];
 
-  const planWorkItemRes = await azureClient.get(
-    `/_apis/wit/workitems/${planId}?fields=System.Title&api-version=${AZURE_API_VERSION}`
-  );
-
-  const plan: TestPlan = {
-    id: wiqlRes.data.workItems?.[0]?.id,
-    name: planWorkItemRes.data.fields['System.Title']
+  if (workItemIds.length === 0) {
+    return getEmptyPlanResponse();
   }
 
-  const testPlans: TestPlan[] = [];
-  testPlans.push(plan)
+  const allWorkItems: any[] = [];
+
+  for (let i = 0; i < workItemIds.length; i += CHUNK_SIZE) {
+    const chunk = workItemIds.slice(i, i + CHUNK_SIZE);
+    const res = await azureClient.get(
+      `/_apis/wit/workitems?ids=${chunk.join(',')}&fields=System.Title&api-version=${AZURE_API_VERSION}`
+    );
+    allWorkItems.push(...res.data.value);
+  }
+
+  const testPlans: TestPlan[] = allWorkItems.map(wi => ({
+    id: wi.id,
+    name: wi.fields['System.Title'],
+  }));
+
+  if (testPlans.length === 0) {
+    return getEmptyPlanResponse();
+  }
+
   const responseTestPlanMetrics = await getAutomationMetricsForPlans(testPlans);
 
   return {
-    plan, 
+    plan: testPlans[0],
     metrics: responseTestPlanMetrics,
   };
-};
+}
+
+function getEmptyPlanResponse() {
+  return {
+    plan: { id: null, name: 'No Plan' },
+    metrics: {
+      plans: [{ planName: 'No Plan' }],
+      overall: {
+        total: 0,
+        totalToBeExecuted: 0,
+        totalNotExecuted: 0,
+        passRate: 0,
+        executionCoverage: 0,
+        manual: 0,
+        automated: 0,
+      },
+    },
+  };
+}
+
 
 export async function countNewAutomatedInPlan(
   planId: number,

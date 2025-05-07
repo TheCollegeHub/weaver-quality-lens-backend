@@ -5,12 +5,14 @@ import { getEffectiveStatus } from "./utils.js";
 import { AutomationStatus } from "../enums/automaton-status.js";
 import { countNewAutomatedInPlan } from "./azure.service.js";
 import { NewAutomatedTestsData } from "../interfaces/sprint-automation-metrics-interface.js";
+import _ from "lodash";
 const ADO_AUTOMATION_STATUS_FIELD = process.env.ADO_AUTOMATION_STATUS_FIELD
 const ADO_CUSTOM_AUTOMATION_STATUS_FIELD = process.env.ADO_CUSTOM_AUTOMATION_STATUS_FIELD
 const ADO_TESTING_TYPE_FIELD = process.env.ADO_TESTING_TYPE_FIELD
 const ADO_AUTOMATION_TOOLS_FIELD = process.env.ADO_AUTOMATION_TOOLS_FIELD
 const ADO_PROJECT = process.env.ADO_PROJECT!;
 const AZURE_API_VERSION = process.env.AZURE_API_VERSION!;
+const CHUNK_SIZE = 200
 
 export async function getAutomationMetricsForPlans(
   testPlans: TestPlan[],
@@ -41,29 +43,39 @@ export async function getAutomationMetricsForPlans(
   const allTestCaseIds = Array.from(testCaseToPlans.keys());
   if (!allTestCaseIds.length) return { overall: emptyOverall(), plans: [] };
 
-  const batchRes = await azureClient.post(
-    `/_apis/wit/workitemsbatch?api-version=${AZURE_API_VERSION}`,
-    {
-      ids: allTestCaseIds,
-      fields: [
-        ADO_CUSTOM_AUTOMATION_STATUS_FIELD,
-        ADO_AUTOMATION_STATUS_FIELD,
-        ADO_TESTING_TYPE_FIELD,
-        ADO_AUTOMATION_TOOLS_FIELD
-      ]
-    }
-  );
+  // CHUNKING: Azure DevOps allows until 200 IDs per request
+  const chunks: number[][] = [];
+  for (let i = 0; i < allTestCaseIds.length; i += CHUNK_SIZE) {
+    chunks.push(allTestCaseIds.slice(i, i + CHUNK_SIZE));
+  }
+
+  const batchResults: any[] = [];
+  for (const chunk of chunks) {
+    const res = await azureClient.post(
+      `/_apis/wit/workitemsbatch?api-version=${AZURE_API_VERSION}`,
+      {
+        ids: chunk,
+        fields: [
+          ADO_CUSTOM_AUTOMATION_STATUS_FIELD,
+          ADO_AUTOMATION_STATUS_FIELD,
+          ADO_TESTING_TYPE_FIELD,
+          ADO_AUTOMATION_TOOLS_FIELD
+        ]
+      }
+    );
+    batchResults.push(...res.data.value);
+  }
 
   const metricsMap = new Map<number, PlanMetrics>();
   const overallLinks = { manual: [] as string[], automated: [] as string[] };
   const overallCategoryMap = new Map<string, { manual: number; automated: number }>();
   const overallToolMap = new Map<string, number>();
-  const overallNewAutomatedLinks: string[] = [];;
+  const overallNewAutomatedLinks: string[] = [];
   let overallManual = 0, overallAutomated = 0;
   let overallToBeExecuted = 0, overallNotExecuted = 0;
   let overallNewAutomated = 0;
 
-  for (const item of batchRes.data.value) {
+  for (const item of batchResults) {
     const id = Number(item.id);
     const status: AutomationStatus = getEffectiveStatus(item.fields);
     const category = item.fields[ADO_TESTING_TYPE_FIELD!] || 'Uncategorized';
@@ -140,8 +152,8 @@ export async function getAutomationMetricsForPlans(
     if (startDate && endDate) {
       const newAutomatedData: NewAutomatedTestsData = await countNewAutomatedInPlan(pm.planId, new Date(startDate), new Date(endDate));
       pm.newAutomated = newAutomatedData;
-      overallNewAutomatedLinks.push(...newAutomatedData.links)
-      pm.automationGrowth= pm.automated
+      overallNewAutomatedLinks.push(...newAutomatedData.links);
+      pm.automationGrowth = pm.automated
         ? parseFloat(((newAutomatedData.count / pm.total) * 100).toFixed(2))
         : 0.00;
       overallNewAutomated += newAutomatedData.count;
@@ -169,7 +181,7 @@ export async function getAutomationMetricsForPlans(
       executionCoverage: plans.length ? parseFloat((plans.reduce((sum, p) => sum + p.executionCoverage, 0) / plans.length).toFixed(2)) : 0.00,
       ...(startDate && endDate
         ? {
-            newAutomated: { count: overallNewAutomated , links: overallNewAutomatedLinks},
+            newAutomated: { count: overallNewAutomated, links: overallNewAutomatedLinks },
             automationGrowth: overalAutomationGrowth,
           }
         : {}),
@@ -180,6 +192,7 @@ export async function getAutomationMetricsForPlans(
     plans
   };
 }
+
 
 export async function getAutomationCoveragePerSuite(
   testPlans: TestPlan[]
@@ -206,28 +219,31 @@ export async function getAutomationCoveragePerSuite(
 
       if (!newTestCaseIds.length) continue;
 
-      const batchRes = await azureClient.post(
-        `/_apis/wit/workitemsbatch?api-version=${AZURE_API_VERSION}`,
-        {
-          ids: newTestCaseIds,
-          fields: [
-            ADO_AUTOMATION_STATUS_FIELD,
-            ADO_CUSTOM_AUTOMATION_STATUS_FIELD
-          ]
-        }
-      );
-
+      const chunkedIds = _.chunk(newTestCaseIds, CHUNK_SIZE);
       let suiteManual = 0;
       let suiteAutomated = 0;
 
-      for (const item of batchRes.data.value) {
-        const status: AutomationStatus = getEffectiveStatus(item.fields);
-        uniqueTestCaseIds.add(item.id);
+      for (const idChunk of chunkedIds) {
+        const batchRes = await azureClient.post(
+          `/_apis/wit/workitemsbatch?api-version=${AZURE_API_VERSION}`,
+          {
+            ids: idChunk,
+            fields: [
+              ADO_AUTOMATION_STATUS_FIELD,
+              ADO_CUSTOM_AUTOMATION_STATUS_FIELD
+            ]
+          }
+        );
 
-        if (status === AutomationStatus.Automated) {
-          suiteAutomated++;
-        } else {
-          suiteManual++;
+        for (const item of batchRes.data.value) {
+          const status: AutomationStatus = getEffectiveStatus(item.fields);
+          uniqueTestCaseIds.add(item.id);
+
+          if (status === AutomationStatus.Automated) {
+            suiteAutomated++;
+          } else {
+            suiteManual++;
+          }
         }
       }
 
@@ -260,14 +276,13 @@ export async function getAutomationCoveragePerSuite(
       totalManual,
       totalAutomated,
       totalTests,
-      totalCoverage: totalCoverage,
+      totalCoverage,
       suites
     });
   }
 
   return coverage;
 }
-
 
 
 function emptyOverall(): AutomationMetricsResponse['overall'] {
