@@ -1,18 +1,84 @@
-import { AutomationMetricsResponse, PlanAutomationCoverage, PlanMetrics, SuiteAutomationCoverage } from "../interfaces/testplans-interface";
-import { azureClient } from '../utils/azureClient.js';
+import { AutomationMetricsResponse, PlanAutomationCoverage, PlanMetrics, SuiteAutomationCoverage, TeamTestPlans } from "../interfaces/testplans-interface.js";
 import { TestPlan } from '../interfaces/testplans-interface.js';
-import { getEffectiveStatus } from "./utils.js";
+import { getEffectiveStatus, getEmptyPlanResponse } from "./utils.js";
 import { AutomationStatus } from "../enums/automaton-status.js";
-import { countNewAutomatedInPlan } from "./azure.service.js";
 import { NewAutomatedTestsData } from "../interfaces/sprint-automation-metrics-interface.js";
+import { fetchWiql, fetchWorkItemById, fetchWorkItemRevisions, fetchWorkItemsBatch, fetchWorkItemsByIds } from "../repositories/azure-workitems.repository.js";
+import { fetchTestCasesFromSuite, fetchTestPlanSuites, fetchTestPointsFromSuite } from "../repositories/azure-testplans.repository.js";
 import _ from "lodash";
+
+const ADO_ORGANIZATION = process.env.ADO_ORGANIZATION
+const ADO_PROJECT = process.env.ADO_PROJECT!;
+
 const ADO_AUTOMATION_STATUS_FIELD = process.env.ADO_AUTOMATION_STATUS_FIELD
 const ADO_CUSTOM_AUTOMATION_STATUS_FIELD = process.env.ADO_CUSTOM_AUTOMATION_STATUS_FIELD
 const ADO_TESTING_TYPE_FIELD = process.env.ADO_TESTING_TYPE_FIELD
 const ADO_AUTOMATION_TOOLS_FIELD = process.env.ADO_AUTOMATION_TOOLS_FIELD
-const ADO_PROJECT = process.env.ADO_PROJECT!;
-const AZURE_API_VERSION = process.env.AZURE_API_VERSION!;
+
 const CHUNK_SIZE = 200
+
+export async function getTestPlansByAreaPaths(
+  areaPaths: string[]
+): Promise<TeamTestPlans[]> {
+  if (!areaPaths || areaPaths.length === 0) {
+    throw new Error('areaPaths are required');
+  }
+
+  const wiqlQuery = {
+    query: `
+      SELECT [System.Id], [System.Title], [System.AreaPath]
+      FROM WorkItems
+      WHERE [System.WorkItemType] = 'Test Plan'
+      AND [System.AreaPath] IN (${areaPaths.map(path => `'${path.trim()}'`).join(',')})
+      ORDER BY [System.CreatedDate] DESC
+    `,
+  };
+
+  try {
+    const wiqlResponse = await fetchWiql(wiqlQuery);
+
+    const ids = wiqlResponse.data.workItems.map((wi: any) => wi.id);
+
+    if (ids.length === 0) {
+      return areaPaths.map(area => ({
+        team: area,
+        totalTestPlans: 0,
+        testplans: [],
+      }));
+    }
+
+    const idChunks = _.chunk(ids, CHUNK_SIZE);
+    const detailPromises = idChunks.map(chunkIds =>
+      fetchWorkItemsByIds(chunkIds.join(','), 'System.Id,System.Title,System.AreaPath')
+    );
+
+    const detailResponses = await Promise.all(detailPromises);
+    const rawPlans = detailResponses.flatMap((res: { data: { value: any[]; }; }) =>
+      res.data.value.map((item: any) => ({
+        id: item.id,
+        name: item.fields['System.Title'],
+        areaPath: item.fields['System.AreaPath'],
+      }))
+    );
+
+    const grouped: TeamTestPlans[] = areaPaths.map(area => {
+      const plans = rawPlans.filter((p: any)  => p.areaPath === area);
+      return {
+        team: area,
+        totalTestPlans: plans.length,
+        testplans: plans.map((p: TestPlan) => ({
+          id: p.id,
+          name: p.name,
+        })),
+      };
+    });
+
+    return grouped;
+  } catch (err) {
+    console.error('Error getting test plans by area paths using WIQL:', err);
+    throw err;
+  }
+}
 
 export async function getAutomationMetricsForPlans(
   testPlans: TestPlan[],
@@ -24,13 +90,9 @@ export async function getAutomationMetricsForPlans(
 
   await Promise.all(testPlans.map(async ({ id: planId, name: planName }) => {
     planNamesMap.set(planId, planName);
-    const suitesRes = await azureClient.get(
-      `/${ADO_PROJECT}/_apis/testplan/plans/${planId}/suites?api-version=${AZURE_API_VERSION}`
-    );
+    const suitesRes = await fetchTestPlanSuites(planId);
     await Promise.all(suitesRes.data.value.map(async (suite: any) => {
-      const casesRes = await azureClient.get(
-        `/${ADO_PROJECT}/_apis/test/plans/${planId}/suites/${suite.id}/testcases?api-version=${AZURE_API_VERSION}`
-      );
+      const casesRes = await fetchTestCasesFromSuite(planId, suite.id)
       for (const testCase of casesRes.data.value) {
         const id = Number(testCase.testCase.id);
         const set = testCaseToPlans.get(id) || new Set<number>();
@@ -51,18 +113,15 @@ export async function getAutomationMetricsForPlans(
 
   const batchResults: any[] = [];
   for (const chunk of chunks) {
-    const res = await azureClient.post(
-      `/_apis/wit/workitemsbatch?api-version=${AZURE_API_VERSION}`,
-      {
+    const res = await fetchWorkItemsBatch({
         ids: chunk,
         fields: [
-          ADO_CUSTOM_AUTOMATION_STATUS_FIELD,
-          ADO_AUTOMATION_STATUS_FIELD,
-          ADO_TESTING_TYPE_FIELD,
-          ADO_AUTOMATION_TOOLS_FIELD
+          ADO_CUSTOM_AUTOMATION_STATUS_FIELD!,
+          ADO_AUTOMATION_STATUS_FIELD!,
+          ADO_TESTING_TYPE_FIELD!,
+          ADO_AUTOMATION_TOOLS_FIELD!
         ]
-      }
-    );
+      })
     batchResults.push(...res.data.value);
   }
 
@@ -125,13 +184,9 @@ export async function getAutomationMetricsForPlans(
     pm.automationCoverage = pm.total ? ((pm.automated / pm.total) * 100).toFixed(2) : '0.00';
 
     const results: string[] = [];
-    const suitesRes = await azureClient.get(
-      `/${ADO_PROJECT}/_apis/testplan/plans/${pm.planId}/suites?api-version=${AZURE_API_VERSION}`
-    );
+    const suitesRes = await fetchTestPlanSuites(pm.planId);
     await Promise.all(suitesRes.data.value.map(async (suite: any) => {
-      const pointsRes = await azureClient.get(
-        `/${ADO_PROJECT}/_apis/test/plans/${pm.planId}/suites/${suite.id}/points?api-version=${AZURE_API_VERSION}`
-      );
+      const pointsRes = await fetchTestPointsFromSuite(pm.planId,suite.id);
       pointsRes.data.value.forEach((p: any) => results.push(p.outcome));
     }));
 
@@ -193,16 +248,13 @@ export async function getAutomationMetricsForPlans(
   };
 }
 
-
 export async function getAutomationCoveragePerSuite(
   testPlans: TestPlan[]
 ): Promise<PlanAutomationCoverage[]> {
   const coverage: PlanAutomationCoverage[] = [];
 
   for (const { id: planId, name: planName } of testPlans) {
-    const suitesRes = await azureClient.get(
-      `/${ADO_PROJECT}/_apis/testplan/plans/${planId}/suites?api-version=${AZURE_API_VERSION}`
-    );
+    const suitesRes = await fetchTestPlanSuites(planId);
 
     const suites: SuiteAutomationCoverage[] = [];
     let totalManual = 0;
@@ -210,10 +262,7 @@ export async function getAutomationCoveragePerSuite(
     const uniqueTestCaseIds = new Set<number>();
 
     for (const suite of suitesRes.data.value) {
-      const casesRes = await azureClient.get(
-        `/${ADO_PROJECT}/_apis/test/plans/${planId}/suites/${suite.id}/testcases?api-version=${AZURE_API_VERSION}`
-      );
-
+      const casesRes = await fetchTestCasesFromSuite(planId, suite.id);
       const testCaseIds: number[] = casesRes.data.value.map((tc: any) => Number(tc.testCase.id));
       const newTestCaseIds = testCaseIds.filter(id => !uniqueTestCaseIds.has(id));
 
@@ -224,16 +273,14 @@ export async function getAutomationCoveragePerSuite(
       let suiteAutomated = 0;
 
       for (const idChunk of chunkedIds) {
-        const batchRes = await azureClient.post(
-          `/_apis/wit/workitemsbatch?api-version=${AZURE_API_VERSION}`,
-          {
+
+        const batchRes = await fetchWorkItemsBatch({
             ids: idChunk,
             fields: [
-              ADO_AUTOMATION_STATUS_FIELD,
-              ADO_CUSTOM_AUTOMATION_STATUS_FIELD
+              ADO_AUTOMATION_STATUS_FIELD!,
+              ADO_CUSTOM_AUTOMATION_STATUS_FIELD!
             ]
-          }
-        );
+          })
 
         for (const item of batchRes.data.value) {
           const status: AutomationStatus = getEffectiveStatus(item.fields);
@@ -282,6 +329,116 @@ export async function getAutomationCoveragePerSuite(
   }
 
   return coverage;
+}
+
+export async function countNewAutomatedInPlan(
+  planId: number,
+  startDate: Date,
+  endDate: Date
+): Promise<NewAutomatedTestsData> {
+  const suitesRes = await fetchTestPlanSuites(planId);
+  const suites: any[] = suitesRes.data.value;
+
+  const allTestCaseIds = new Set<number>();
+
+  await Promise.all(
+    suites.map(async (suite) => {
+      const casesRes = await fetchTestCasesFromSuite(planId, suite.id)
+      for (const tc of casesRes.data.value) {
+        allTestCaseIds.add(Number(tc.testCase.id));
+      }
+    })
+  );
+
+  const automatedTestCaseIds: number[] = [];
+
+  await Promise.all(
+    Array.from(allTestCaseIds).map(async (testCaseId) => {
+      const wiRes = await fetchWorkItemById(testCaseId,`${ADO_AUTOMATION_STATUS_FIELD},${ADO_CUSTOM_AUTOMATION_STATUS_FIELD}`)
+      const fields = wiRes.data.fields;
+      const status: AutomationStatus = getEffectiveStatus(fields);
+
+      if (status === AutomationStatus.Automated) {
+        automatedTestCaseIds.push(testCaseId);
+      }
+    })
+  );
+
+  let count = 0;
+  const links: string[] = [];
+
+  await Promise.all(
+    automatedTestCaseIds.map(async (testCaseId) => {
+      const revRes = await fetchWorkItemRevisions(testCaseId);
+      const revisions = revRes.data.value;
+
+      for (let i = 1; i < revisions.length; i++) {
+        const prevStatus = getEffectiveStatus(revisions[i - 1].fields);
+        const currStatus = getEffectiveStatus(revisions[i].fields);
+        const changedAt = new Date(revisions[i].fields['System.ChangedDate']);
+
+        if (
+          changedAt >= startDate &&
+          changedAt <= endDate &&
+          prevStatus !== AutomationStatus.Automated &&
+          currStatus === AutomationStatus.Automated
+        ) {
+          count++;
+          links.push(`https://dev.azure.com/${ADO_ORGANIZATION}/${ADO_PROJECT}/_workitems/edit/${testCaseId}`);
+          break;
+        }
+      }
+    })
+  );
+
+  return { count, links };
+}
+
+export async function getTestPlanData(areaPath: string, iterationPath: string) {
+  const wiql = {
+    query: `
+      SELECT [System.Id]
+      FROM workitems
+      WHERE
+        [System.TeamProject] = '${decodeURIComponent(ADO_PROJECT!)}'
+        AND [System.WorkItemType] = 'Test Plan'
+        AND [System.AreaPath] UNDER '${areaPath}'
+        AND [System.IterationPath] = '${iterationPath}'
+      ORDER BY [System.ChangedDate] DESC
+    `,
+  };
+
+  const wiqlRes = await fetchWiql(wiql)
+
+  const workItemIds: number[] = wiqlRes.data.workItems?.map((w: any) => w.id) ?? [];
+
+  if (workItemIds.length === 0) {
+    return getEmptyPlanResponse();
+  }
+
+  const allWorkItems: any[] = [];
+
+  for (let i = 0; i < workItemIds.length; i += CHUNK_SIZE) {
+    const chunk = workItemIds.slice(i, i + CHUNK_SIZE);
+    const res = await fetchWorkItemsByIds(chunk.join(','), 'System.Title')
+    allWorkItems.push(...res.data.value);
+  }
+
+  const testPlans: TestPlan[] = allWorkItems.map(wi => ({
+    id: wi.id,
+    name: wi.fields['System.Title'],
+  }));
+
+  if (testPlans.length === 0) {
+    return getEmptyPlanResponse();
+  }
+
+  const responseTestPlanMetrics = await getAutomationMetricsForPlans(testPlans);
+
+  return {
+    plan: testPlans[0],
+    metrics: responseTestPlanMetrics,
+  };
 }
 
 

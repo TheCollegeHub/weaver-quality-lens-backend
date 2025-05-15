@@ -1,3 +1,5 @@
+import { TestPlan } from "./testplans-interface";
+
 export interface SprintMetrics {
     sprintName: string;
     planName: string;
@@ -33,4 +35,10 @@ export interface SprintTestPlanData {
 export interface NewAutomatedTestsData{
     count: number; 
     links: string[]
+}
+
+export interface AutomationRequestBody {
+  plans: TestPlan[];
+  startDate: string;
+  endDate: string;
 }

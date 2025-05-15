@@ -12,3 +12,21 @@ export function getEffectiveStatus(fields: Record<string, any>): AutomationStatu
   if (isAutomatedStatus(standard) || isAutomatedStatus(custom)) return AutomationStatus.Automated;
   else return AutomationStatus.Manual
 }
+
+export function getEmptyPlanResponse() {
+  return {
+    plan: { id: null, name: 'No Plan' },
+    metrics: {
+      plans: [{ planName: 'No Plan' }],
+      overall: {
+        total: 0,
+        totalToBeExecuted: 0,
+        totalNotExecuted: 0,
+        passRate: 0,
+        executionCoverage: 0,
+        manual: 0,
+        automated: 0,
+      },
+    },
+  };
+}
