@@ -1,9 +1,9 @@
-import { AutomationMetricsResponse, PlanAutomationCoverage, PlanMetrics, SuiteAutomationCoverage, TeamTestPlans } from "../interfaces/testplans-interface.js";
+import { AutomationMetricsResponse, PlanAutomationCoverage, PlanMetrics, SuiteAutomationCoverage, TeamTestPlans, TestCaseInfo } from "../interfaces/testplans-interface.js";
 import { TestPlan } from '../interfaces/testplans-interface.js';
 import { getEffectiveStatus, getEmptyPlanResponse } from "./utils.js";
 import { AutomationStatus } from "../enums/automaton-status.js";
 import { NewAutomatedTestsData } from "../interfaces/sprint-automation-metrics-interface.js";
-import { fetchWiql, fetchWorkItemById, fetchWorkItemRevisions, fetchWorkItemsBatch, fetchWorkItemsByIds } from "../repositories/azure-workitems.repository.js";
+import { fetchRecentTestRuns, fetchTestResultsByRun, fetchWiql, fetchWorkItemById, fetchWorkItemRevisions, fetchWorkItemsBatch, fetchWorkItemsByIds } from "../repositories/azure-workitems.repository.js";
 import { fetchTestCasesFromSuite, fetchTestPlanSuites, fetchTestPointsFromSuite } from "../repositories/azure-testplans.repository.js";
 import _ from "lodash";
 
@@ -438,6 +438,149 @@ export async function getTestPlanData(areaPath: string, iterationPath: string) {
   return {
     plan: testPlans[0],
     metrics: responseTestPlanMetrics,
+  };
+}
+
+export async function getReadyTestCasesByAreaPaths(areaPaths: string[]) {
+  const allTestCaseIds: number[] = [];
+  const allTestCases: any[] = [];
+
+  const overallByTeam: {
+    areaPath: string;
+    total: number;
+    manual: number;
+    automated: number;
+    automationCoverage: number;
+  }[] = [];
+
+  for (const area of areaPaths) {
+    const wiqlQuery = {
+      query: `
+        SELECT [System.Id] FROM WorkItems
+        WHERE
+          [System.WorkItemType] = 'Test Case'
+          AND [System.State] <> 'Closed'
+          AND [System.AreaPath] UNDER '${area}'
+      `
+    };
+
+    const result = await fetchWiql(wiqlQuery);
+    const testCaseIds = result.data?.workItems?.map((item: any) => item.id) || [];
+
+    if (testCaseIds.length === 0) {
+      overallByTeam.push({
+        areaPath: area,
+        total: 0,
+        automated: 0,
+        manual: 0,
+        automationCoverage: 0
+      });
+      continue;
+    }
+
+    const chunks: number[][] = [];
+    for (let i = 0; i < testCaseIds.length; i += CHUNK_SIZE) {
+      chunks.push(testCaseIds.slice(i, i + CHUNK_SIZE));
+    }
+
+    const areaTestCases: any[] = [];
+
+    for (const chunk of chunks) {
+      const res = await fetchWorkItemsBatch({
+        ids: chunk,
+        fields: [
+          'System.Id',
+          'System.Title',
+          'System.State',
+          'System.AreaPath',
+          process.env.ADO_CUSTOM_AUTOMATION_STATUS_FIELD!,
+          process.env.ADO_AUTOMATION_STATUS_FIELD!,
+          process.env.ADO_TESTING_TYPE_FIELD!,
+          process.env.ADO_AUTOMATION_TOOLS_FIELD!
+        ]
+      });
+
+      areaTestCases.push(...res.data.value);
+    }
+
+    let automated = 0;
+
+    for (const item of areaTestCases) {
+      const status: AutomationStatus = getEffectiveStatus(item.fields);
+      if (status === AutomationStatus.Automated) automated++;
+    }
+
+    const total = areaTestCases.length;
+    const manual = total - automated;
+    const automationCoverage = total > 0 ? Number(((automated / total) * 100).toFixed(2)) : 0;
+
+    overallByTeam.push({
+      areaPath: area,
+      total,
+      automated,
+      manual,
+      automationCoverage
+    });
+
+    allTestCaseIds.push(...testCaseIds);
+    allTestCases.push(...areaTestCases);
+  }
+
+  const total = allTestCases.length;
+  const automated = overallByTeam.reduce((sum, team) => sum + team.automated, 0);
+  const manual = total - automated;
+  const automationCoverage = total > 0 ? Number(((automated / total) * 100).toFixed(2)) : 0;
+
+  return {
+    testCases: allTestCases,
+    overall: {
+      total,
+      automated,
+      manual,
+      automationCoverage
+    },
+    overallByTeam
+  };
+}
+
+
+
+export async function getTestCaseUsageStatus(testCases: TestCaseInfo[]) {
+  console.log()
+  const recentRuns = await fetchRecentTestRuns();
+  const usedTestCasesMap = new Map<number, string>();
+
+  for (const run of recentRuns) {
+    const results = await fetchTestResultsByRun(run.id);
+
+    for (const result of results) {
+      const testCaseId = Number(result.testCase?.id);
+      const testCaseTitle = result.testCaseTitle;
+      if (testCaseId && testCaseTitle) {
+        usedTestCasesMap.set(testCaseId, testCaseTitle);
+      }
+    }
+  }
+
+  const used: TestCaseInfo[] = [];
+  const unused: TestCaseInfo[] = [];
+
+  for (const testCase of testCases) {
+    if (usedTestCasesMap.has(testCase.id)) {
+      used.push(testCase);
+    } else {
+      unused.push(testCase);
+    }
+  }
+
+  return {
+    used,
+    unused,
+    overall: {
+      totalUsed: used.length,
+      totalUnused: unused.length,
+      total: testCases.length
+    }
   };
 }
 

@@ -3,7 +3,9 @@ import {
   getTestPlansByAreaPaths,
   getAutomationMetricsForPlans,
   countNewAutomatedInPlan,
-  getAutomationCoveragePerSuite
+  getAutomationCoveragePerSuite,
+  getReadyTestCasesByAreaPaths,
+  getTestCaseUsageStatus
 } from '../services/azure-testplans.service.js';
 import { AutomationRequestBody, NewAutomatedTestsData } from '../interfaces/sprint-automation-metrics-interface.js';
 import { TestPlan } from '../interfaces/testplans-interface.js';
@@ -100,5 +102,38 @@ export async function automationCoveragePerSuite(req: Request, res: Response) {
   } catch (error: any) {
     console.error('Error in /coverage-by-suite:', error);
     return res.status(500).json({ message: 'Internal Server Error', error: error.message });
+  }
+}
+
+export async function fetchReadyTestCases(req: Request, res: Response) {
+  const { areaPaths } = req.query;
+  const areaPathList = areaPaths ? String(areaPaths).split(',').map(p => p.trim()) : undefined;
+
+  if (!areaPathList || areaPathList.length === 0) {
+    return res.status(400).json({ error: 'areaPaths is required' });
+  }
+
+  try {
+    const testCases = await getReadyTestCasesByAreaPaths(areaPathList);
+    res.json(testCases);
+  } catch (err: any) {
+    console.error('Error fetching test cases:', err);
+    res.status(500).json({ error: err.message });
+  }
+}
+
+export async function getTestCaseUsage(req: Request, res: Response) {
+  const testCases = req.body.testCases;
+
+  if (!Array.isArray(testCases) || testCases.length === 0) {
+    return res.status(400).json({ error: 'Body must contain a non-empty array of testCases with id and title.' });
+  }
+
+  console.log(testCases)
+  try {
+    const result = await getTestCaseUsageStatus(testCases);
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
   }
 }

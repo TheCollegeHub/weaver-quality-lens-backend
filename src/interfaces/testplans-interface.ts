@@ -94,3 +94,8 @@ export interface PlanAutomationCoverage {
   suites: SuiteAutomationCoverage[];
 }
 
+export interface TestCaseInfo{
+  id: number,
+  title: string
+}
+

@@ -33,6 +33,48 @@ export async function fetchWorkItemRevisions(workItemId: number) {
   return response;
 }
 
+export async function fetchRecentTestRuns(days: number = 90) {
+  const now = new Date();
+  const start = new Date(now);
+  start.setDate(start.getDate() - days);
+
+  const runs: any[] = [];
+
+  let current = new Date(start);
+  while (current < now) {
+    const next = new Date(current);
+    next.setDate(next.getDate() + 7);
+    if (next > now) next.setTime(now.getTime());
+
+    const min = current.toISOString();
+    const max = next.toISOString();
+
+    const url = `/${ADO_PROJECT}/_apis/test/runs?minLastUpdatedDate=${min}&maxLastUpdatedDate=${max}&$top=100&api-version=7.1`;
+
+    try {
+      const response = await azureClient.get(url);
+      runs.push(...response.data.value);
+    } catch (err) {
+      console.error(`Erro ao buscar runs entre ${min} e ${max}`, err);
+    }
+
+    current = next;
+  }
+
+  return runs;
+}
+
+
+
+export async function fetchTestResultsByRun(runId: number) {
+  const url = `/${ADO_PROJECT}/_apis/test/runs/${runId}/results?api-version=${AZURE_API_VERSION}`;
+  const response = await azureClient.get(url);
+  return response.data.value;
+}
+
+
+
+
  
 
 
