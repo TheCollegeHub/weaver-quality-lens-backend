@@ -1,6 +1,3 @@
 <p align="center">
-  <picture>
-    <source srcset="./imgs/logo_white.png" media="(prefers-color-scheme: dark)">
-    <img src="./imgs/logo_black.png" alt="Logo" width="300">
-  </picture>
+  <img src="./imgs/logo_gray.png" alt="Descrição da imagem" width="300"/>
 </p>
