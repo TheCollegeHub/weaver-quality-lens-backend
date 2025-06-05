@@ -4,6 +4,7 @@ export type SprintData = {
   startDate: string;
   finishDate: string;
   timeFrame?: string;
+  teamName?: string
 }
 
 export type OpenAndCLosedBugMetric = {

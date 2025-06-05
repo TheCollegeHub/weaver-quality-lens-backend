@@ -10,7 +10,12 @@ export async function fetchAreaNodes(path = '') {
 
 export async function fetchTeamIterations() {
   const url = `/${ADO_PROJECT}/_apis/work/teamsettings/iterations?api-version=${AZURE_API_VERSION}`;
-   const { data } = await azureClient.get(url);
-   return data
+  const { data } = await azureClient.get(url);
+  return data
 }
 
+export async function fetchTeamIterationsByClassificationNodes() {
+  const url = `/${ADO_PROJECT}/_apis/wit/classificationnodes/iterations?$depth=3&api-version=${AZURE_API_VERSION}`;
+  const { data } = await azureClient.get(url);
+  return data
+}

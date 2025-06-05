@@ -5,12 +5,13 @@ import { getTestPlanData } from './azure-testplans.service.js';
 import { fetchWiql, fetchWorkItemsBatch } from '../repositories/azure-workitems.repository.js';
 import dayjs from 'dayjs';
 import _ from "lodash";
-import { fetchTeamIterations } from '../repositories/azure-organization.repository.js';
+import { fetchTeamIterations, fetchTeamIterationsByClassificationNodes } from '../repositories/azure-organization.repository.js';
 
 
 const ADO_PROJECT = process.env.ADO_PROJECT
 const ADO_ORGANIZATION = process.env.ADO_ORGANIZATION
 const CHUNK_SIZE = 200;
+const ADO_SEVERITY_FIELD = process.env.ADO_SEVERITY_FIELD!
 
 export async function getPastSprintsByTeamSettings(numSprints: number): Promise<SprintData[]> {
   const iterations = await fetchTeamIterations();
@@ -35,6 +36,46 @@ export async function getPastSprintsByTeamSettings(numSprints: number): Promise<
 
   return pastSprints;
 }
+
+export async function getPastSprintsByTeamSettingsV2(areaPaths: string[], numSprints: number): Promise<SprintData[]> {
+  const data = await fetchTeamIterationsByClassificationNodes();
+  const now = new Date();
+
+  const teamNames = areaPaths
+    .map(areaPath => areaPath.split('\\')[1]?.toLowerCase())
+    .filter(Boolean);
+
+  const teamNodes = data.children.filter((node: any) =>
+    teamNames.includes(node.name.toLowerCase())
+  );
+
+  const allLastSprintsByTeam: SprintData[] = teamNodes.flatMap((teamNode: any) => {
+    const teamIterationPath = teamNode.path.replace(/\\Iteration/, '');
+    const teamName = teamNode.name.toLowerCase();
+
+    const sprints = (teamNode.children || [])
+      .filter((sprint: any) => sprint.attributes?.startDate && sprint.attributes?.finishDate)
+      .filter((sprint: any) => new Date(sprint.attributes.finishDate) < now)
+      .map((sprint: any) => ({
+        name: sprint.name,
+        teamName,
+        iterationPath: `${teamIterationPath}\\${sprint.name}`.replace(/^\\/, ''),
+        startDate: sprint.attributes.startDate,
+        finishDate: sprint.attributes.finishDate,
+        timeFrame: sprint.attributes.timeFrame,
+      }));
+
+    // Ordenar por data decrescente e pegar as últimas N sprints desse time
+    const lastNSprints = sprints
+      .sort((a: { startDate: string | number | Date; }, b: { startDate: string | number | Date; }) => new Date(b.startDate).getTime() - new Date(a.startDate).getTime())
+      .slice(0, numSprints);
+
+    return lastNSprints;
+  });
+  
+  return allLastSprintsByTeam;
+}
+
 
 export async function getBugMetricsBySprints(areaPaths: string[], numSprints: number): Promise<SprintBugReport> {
   const pastSprints = await getPastSprintsByTeamSettings(numSprints);
@@ -102,7 +143,7 @@ export async function getBugMetricsBySprints(areaPaths: string[], numSprints: nu
               'System.State',
               'System.CreatedDate',
               'Microsoft.VSTS.Common.ClosedDate',
-              'Microsoft.VSTS.Common.Severity'
+              ADO_SEVERITY_FIELD
             ]
           })
           for (const item of detailRes.data.value) {
@@ -111,7 +152,7 @@ export async function getBugMetricsBySprints(areaPaths: string[], numSprints: nu
               ? new Date(item.fields['Microsoft.VSTS.Common.ClosedDate'])
               : null;
 
-            const severity = item.fields['Microsoft.VSTS.Common.Severity'] || 'Unknown';
+            const severity = item.fields[ADO_SEVERITY_FIELD] || 'Unknown';
 
             const createdInSprint = created >= start && created <= end;
             
@@ -306,6 +347,280 @@ export async function getBugMetricsBySprints(areaPaths: string[], numSprints: nu
   };
 }
 
+export async function getBugMetricsBySprintsV2(areaPaths: string[], numSprints: number): Promise<SprintBugReport> {
+  const pastSprints = await getPastSprintsByTeamSettingsV2(areaPaths, numSprints);
+
+  // Extrai nomes únicos das sprints
+  const sprintNames = Array.from(new Set(pastSprints.map(s => s.name)));
+
+  const teamsBugs: SprintBugReport['teams'] = [];
+  const sprintOveralls: SprintBugReport['sprintOveralls'] = [];
+
+  let totalOpened = 0;
+  let totalClosed = 0;
+  let totalOpenedLinks: string[] = [];
+  let totalClosedLinks: string[] = [];
+  let totalAgingDays = 0;
+  let totalClosedForAging = 0;
+  let overallAgingAboveThresholdLinks: string[] = [];
+  const overallAgingBySeverity: Record<string, { count: number; totalDays: number }> = {};
+
+  for (const sprintName of sprintNames) {
+    let sprintOpened = 0;
+    let sprintClosed = 0;
+    let sprintOpenedLinks: string[] = [];
+    let sprintClosedLinks: string[] = [];
+    let sprintTotalAgingDays = 0;
+    let sprintClosedForAging = 0;
+    let sprintAgingAboveThresholdLinks: string[] = [];
+    const sprintAgingBySeverity: Record<string, { count: number; totalDays: number }> = {};
+
+    for (const areaPath of areaPaths) {
+      const teamName = areaPath.split('\\')[1]?.toLowerCase();
+      // Busca a sprint deste time
+      const sprint = pastSprints.find(s => s.teamName === teamName && s.name === sprintName);
+      if (!sprint) continue;
+
+      const start = new Date(sprint.startDate!);
+      const end = new Date(sprint.finishDate!);
+      end.setHours(23, 59, 59, 999);
+      const iterationPath = sprint.iterationPath
+
+      let openedIds: number[] = [];
+      let closedIds: number[] = [];
+      let sprintAreaAgingTotal = 0;
+      let sprintAreaClosedCount = 0;
+      let agingAboveThresholdLinks: string[] = [];
+      const areaAgingBySeverity: Record<string, { count: number; totalDays: number }> = {};
+
+      const wiqlQuery = {
+        query: `
+          SELECT [System.Id]
+          FROM WorkItems
+          WHERE 
+            [System.TeamProject] = '${decodeURIComponent(ADO_PROJECT!)}'
+            AND [System.WorkItemType] = 'Bug'
+            AND [System.AreaPath] UNDER '${areaPath}'
+            AND [System.IterationPath] = '${iterationPath}'
+        `
+      };
+
+      const res = await fetchWiql(wiqlQuery);
+      const ids = res.data.workItems.map((w: any) => w.id);
+
+      if (ids.length) {
+        const batches = [];
+        for (let i = 0; i < ids.length; i += CHUNK_SIZE) {
+          batches.push(ids.slice(i, i + CHUNK_SIZE));
+        }
+
+        for (const batch of batches) {
+          const detailRes = await fetchWorkItemsBatch({
+            ids: batch,
+            fields: [
+              'System.State',
+              'System.CreatedDate',
+              'Microsoft.VSTS.Common.ClosedDate',
+              ADO_SEVERITY_FIELD
+            ]
+          });
+          for (const item of detailRes.data.value) {
+            const created = new Date(item.fields['System.CreatedDate']);
+            const closed = item.fields['Microsoft.VSTS.Common.ClosedDate']
+              ? new Date(item.fields['Microsoft.VSTS.Common.ClosedDate'])
+              : null;
+
+            const severity = item.fields[ADO_SEVERITY_FIELD] || 'Unknown';
+
+            const createdInSprint = created >= start && created <= end;
+            const closedInSprint = closed && closed >= start;
+
+            if (createdInSprint) openedIds.push(item.id);
+            if (closedInSprint) {
+              closedIds.push(item.id);
+
+              const agingDays = Math.ceil((closed!.getTime() - created.getTime()) / (1000 * 60 * 60 * 24));
+              sprintAreaAgingTotal += agingDays;
+              sprintAreaClosedCount++;
+              sprintTotalAgingDays += agingDays;
+              sprintClosedForAging++;
+              totalAgingDays += agingDays;
+              totalClosedForAging++;
+
+              if (!areaAgingBySeverity[severity]) {
+                areaAgingBySeverity[severity] = { count: 0, totalDays: 0 };
+              }
+              areaAgingBySeverity[severity].count++;
+              areaAgingBySeverity[severity].totalDays += agingDays;
+
+              if (!sprintAgingBySeverity[severity]) {
+                sprintAgingBySeverity[severity] = { count: 0, totalDays: 0 };
+              }
+              sprintAgingBySeverity[severity].count++;
+              sprintAgingBySeverity[severity].totalDays += agingDays;
+
+              if (!overallAgingBySeverity[severity]) {
+                overallAgingBySeverity[severity] = { count: 0, totalDays: 0 };
+              }
+              overallAgingBySeverity[severity].count++;
+              overallAgingBySeverity[severity].totalDays += agingDays;
+
+              if (agingDays > 7) {
+                const link = `https://dev.azure.com/${ADO_ORGANIZATION}/${ADO_PROJECT}/_workitems/edit/${item.id}`;
+                agingAboveThresholdLinks.push(link);
+                sprintAgingAboveThresholdLinks.push(link);
+                overallAgingAboveThresholdLinks.push(link);
+              }
+            }
+          }
+        }
+      }
+
+      const bugLink = (id: number) =>
+        `https://dev.azure.com/${ADO_ORGANIZATION}/${ADO_PROJECT}/_workitems/edit/${id}`;
+
+      const openedLinks = openedIds.map(bugLink);
+      const closedLinks = closedIds.map(bugLink);
+
+      totalOpened += openedIds.length;
+      totalClosed += closedIds.length;
+      totalOpenedLinks.push(...openedLinks);
+      totalClosedLinks.push(...closedLinks);
+
+      sprintOpened += openedIds.length;
+      sprintClosed += closedIds.length;
+      sprintOpenedLinks.push(...openedLinks);
+      sprintClosedLinks.push(...closedLinks);
+
+      const stillOpenRaw = openedIds.length === 0
+        ? 0
+        : ((openedIds.length - closedIds.length) / openedIds.length) * 100;
+
+      const stillOpenPct = `${Math.max(0, stillOpenRaw).toFixed(2)}%`;
+
+      const bugAgingBySeverityArray = Object.entries(areaAgingBySeverity)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([severity, data]) => ({
+          severity,
+          count: data.count,
+          averageDays: (data.totalDays / data.count).toFixed(2)
+        }));
+
+      let team = teamsBugs.find(team => team.areaPath === areaPath);
+      if (!team) {
+        team = {
+          areaPath,
+          sprints: []
+        };
+        teamsBugs.push(team);
+      }
+
+      const sprintMetric = {
+        sprint: {
+          name: sprintName,
+          iterationPath,
+          startDate: sprint.startDate,
+          finishDate: sprint.finishDate
+        },
+        openAndClosedBugMetric: {
+          opened: {
+            total: openedIds.length,
+            bugLinks: openedLinks
+          },
+          closed: {
+            total: closedIds.length,
+            bugLinks: closedLinks
+          },
+          stillOpen: stillOpenPct
+        },
+        bugAging: {
+          averageDays: sprintAreaClosedCount === 0 ? null : (sprintAreaAgingTotal / sprintAreaClosedCount).toFixed(2),
+          agingAboveThresholdLinks,
+          bugAgingBySeverity: bugAgingBySeverityArray
+        }
+      };
+      team.sprints.push(sprintMetric);
+    }
+
+    const sprintStillOpenRaw = sprintOpened === 0
+      ? 0
+      : ((sprintOpened - sprintClosed) / sprintOpened) * 100;
+
+    const sprintStillOpenPct = `${Math.max(0, sprintStillOpenRaw).toFixed(2)}%`;
+
+    const sprintAgingBySeverityArray = Object.entries(sprintAgingBySeverity)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([severity, data]) => ({
+        severity,
+        count: data.count,
+        averageDays: (data.totalDays / data.count).toFixed(2)
+      }));
+
+    sprintOveralls.push({
+      sprint: {
+        name: sprintName,
+        iterationPath: "", 
+        startDate: "",
+        finishDate: ""
+      },
+      openAndClosedBugMetric: {
+        opened: {
+          total: sprintOpened,
+          bugLinks: sprintOpenedLinks
+        },
+        closed: {
+          total: sprintClosed,
+          bugLinks: sprintClosedLinks
+        },
+        stillOpen: sprintStillOpenPct
+      },
+      bugAging: {
+        averageDays: sprintClosedForAging === 0 ? null : (sprintTotalAgingDays / sprintClosedForAging).toFixed(2),
+        agingAboveThresholdLinks: sprintAgingAboveThresholdLinks,
+        bugAgingBySeverity: sprintAgingBySeverityArray
+      }
+    });
+  }
+
+  const overallStillOpenRaw = totalOpened === 0
+    ? 0
+    : ((totalOpened - totalClosed) / totalOpened) * 100;
+
+  const overallStillOpenPct = `${Math.max(0, overallStillOpenRaw).toFixed(2)}%`;
+
+  const overallAgingBySeverityArray = Object.entries(overallAgingBySeverity)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([severity, data]) => ({
+      severity,
+      count: data.count,
+      averageDays: (data.totalDays / data.count).toFixed(2)
+    }));
+
+  return {
+    teams: teamsBugs,
+    sprintOveralls,
+    overall: {
+      openAndClosedBugMetric: {
+        opened: {
+          total: totalOpened,
+          bugLinks: totalOpenedLinks
+        },
+        closed: {
+          total: totalClosed,
+          bugLinks: totalClosedLinks
+        },
+        stillOpen: overallStillOpenPct
+      },
+      bugAging: {
+        averageDays: totalClosedForAging === 0 ? null : (totalAgingDays / totalClosedForAging).toFixed(2),
+        agingAboveThresholdLinks: overallAgingAboveThresholdLinks,
+        bugAgingBySeverity: overallAgingBySeverityArray
+      }
+    }
+  };
+}
+
+
 export async function getBugDetailsFromLinks(links: string[]) {
   const apiVersion = process.env.AZURE_API_VERSION;
 
@@ -345,7 +660,7 @@ export async function getBugDetailsFromLinks(links: string[]) {
         'System.Title',
         'System.CreatedDate',
         'Microsoft.VSTS.Common.ClosedDate',
-        'Microsoft.VSTS.Common.Severity'
+        ADO_SEVERITY_FIELD
       ]
     })
 
@@ -363,7 +678,7 @@ export async function getBugDetailsFromLinks(links: string[]) {
         id: item.id,
         link: linkMap.get(item.id)!,
         title: item.fields['System.Title'],
-        severity: item.fields['Microsoft.VSTS.Common.Severity'] || 'Unknown',
+        severity: item.fields[ADO_SEVERITY_FIELD] || 'Unknown',
         agingInDays
       });
     }
@@ -420,7 +735,7 @@ export async function getBugLeakageBreakdown(areaPaths: string[]) {
             ids: batch,
             fields: [
               'System.Id',
-              'Microsoft.VSTS.Common.Severity',
+              ADO_SEVERITY_FIELD,
               ADO_BUG_ENVIRONMT_CUSTOM_FIELD!
             ]
           })
@@ -428,7 +743,7 @@ export async function getBugLeakageBreakdown(areaPaths: string[]) {
           for (const item of detailRes.data.value) {
             const envRaw = item.fields[ADO_BUG_ENVIRONMT_CUSTOM_FIELD!] || 'UNKNOWN';
             const env = envRaw.trim().toUpperCase();
-            const severity = item.fields['Microsoft.VSTS.Common.Severity'] || 'UNKNOWN';
+            const severity = item.fields[ADO_SEVERITY_FIELD] || 'UNKNOWN';
 
             if (env.includes(ADO_PROD_ENVIRONMENT_LABEL)) {
               prodCount++;
@@ -579,14 +894,14 @@ export async function getBugLeakageBySprint(areaPaths: string[], numSprints: num
               fields: [
                 'System.Id',
                 ADO_BUG_ENVIRONMT_CUSTOM_FIELD,
-                'Microsoft.VSTS.Common.Severity'
+                ADO_SEVERITY_FIELD
               ]
             })
 
           for (const bug of detailRes.data.value) {
             const envRaw = bug.fields[ADO_BUG_ENVIRONMT_CUSTOM_FIELD] || 'UNKNOWN';
             const env = envRaw.trim().toUpperCase();
-            const sev = bug.fields['Microsoft.VSTS.Common.Severity'] || 'UNKNOWN';
+            const sev = bug.fields[ADO_SEVERITY_FIELD] || 'UNKNOWN';
 
             if (env.includes(ADO_PROD_ENVIRONMENT_LABEL)) {
               prodCount++;

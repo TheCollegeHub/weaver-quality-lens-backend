@@ -6,18 +6,22 @@ import {
   getBugMetricsBySprints,
   getSprintTestMetrics,
 } from '../services/azure-teams.service';
+import { getBugMetricsServiceForClient } from '../factories/teams-factory';
+const ADO_BACKEND_SETTINGS = process.env.ADO_BACKEND_SETTINGS || 'client-teamsettings'
 
 export const fetchBugMetricsBySprints = async (req: Request, res: Response) => {
   try {
     const { areaPaths, numSprints } = req.query;
     const areaPathList = areaPaths ? String(areaPaths).split(',') : undefined;
-    const metrics = await getBugMetricsBySprints(areaPathList!, Number(numSprints));
+    const getBugMetricsService = getBugMetricsServiceForClient(ADO_BACKEND_SETTINGS);
+    const metrics = await getBugMetricsService(areaPathList!, Number(numSprints));
     return res.json(metrics);
   } catch (err: any) {
     console.error(err);
     return res.status(500).json({ error: err.message });
   }
 };
+
 
 export const fetchBugDetails = async (req: Request, res: Response) => {
   try {
