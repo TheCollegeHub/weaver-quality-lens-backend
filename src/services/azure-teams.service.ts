@@ -532,7 +532,12 @@ export async function getBugLeakageBySprint(areaPaths: string[], numSprints: num
   const results: BugLeakageBySprintResult = {
     teams: [],
     sprintOverall: [],
-    overall: []
+    overall: [],
+    overallSeverity: {
+      total: 0,
+      severities: [],
+       distributionByEnv: []
+    }
   };
 
   for (const areaPath of areaPaths) {
@@ -678,6 +683,62 @@ export async function getBugLeakageBySprint(areaPaths: string[], numSprints: num
         .sort(([a], [b]) => a.localeCompare(b))
         .map(([severity, count]) => ({ severity, total: count }))
     }));
+
+  for (const env of results.overall) {
+    const total = env.total;
+    for (const sev of env.severities) {
+      const pct = total > 0 ? (sev.total / total) * 100 : 0;
+      sev.rate = `${pct.toFixed(2)}%`;
+    }
+  }
+
+  const severityCountMap: Record<string, number> = {};
+  const severityEnvCountMap: Record<string, { prod: number; nonProd: number }> = {};
+  let totalBugs = 0;
+
+  for (const env of results.overall) {
+    const isProd = env.environment.includes(ADO_PROD_ENVIRONMENT_LABEL);
+    for (const sev of env.severities) {
+      severityCountMap[sev.severity] = (severityCountMap[sev.severity] || 0) + sev.total;
+      totalBugs += sev.total;
+
+      if (!severityEnvCountMap[sev.severity]) {
+        severityEnvCountMap[sev.severity] = { prod: 0, nonProd: 0 };
+      }
+
+      if (isProd) {
+        severityEnvCountMap[sev.severity].prod += sev.total;
+      } else {
+        severityEnvCountMap[sev.severity].nonProd += sev.total;
+      }
+    }
+  }
+
+  const severities = Object.entries(severityCountMap).map(([severity, total]) => ({
+    severity,
+    total,
+    rate: `${((total / totalBugs) * 100).toFixed(2)}%`
+  }));
+
+  const distributionByEnv = Object.entries(severityEnvCountMap).map(([severity, { prod, nonProd }]) => {
+    const total = totalBugs
+    const prodPct = total > 0 ? `${((prod / total) * 100).toFixed(2)}%` : '0.00%';
+    const nonProdPct = total > 0 ? `${((nonProd / total) * 100).toFixed(2)}%` : '0.00%';
+    return {
+      severity,
+      totalProd: prod,
+      totalNonProd: nonProd,
+      prodPct,
+      nonProdPct
+    };
+  });
+
+  results.overallSeverity = {
+    total: totalBugs,
+    severities,
+    distributionByEnv
+  };
+
 
   return results;
 }
