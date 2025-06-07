@@ -1,4 +1,5 @@
 import { AutomationStatus } from "../enums/automaton-status";
+import { severityTranslationMap } from "../enums/severity";
 
 // export function isAutomatedStatus(raw: string | undefined | null): boolean {
 //   if (!raw) return false;
@@ -41,4 +42,8 @@ export function getEmptyPlanResponse() {
       },
     },
   };
+}
+
+export function normalizeSeverity(severity: string): string {
+  return severityTranslationMap[severity.trim()] || 'Unknown';
 }

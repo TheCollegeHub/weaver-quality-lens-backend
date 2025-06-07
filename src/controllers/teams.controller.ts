@@ -2,11 +2,9 @@ import { Request, Response } from 'express';
 import {
   getBugDetailsFromLinks,
   getBugLeakageBreakdown,
-  getBugLeakageBySprint,
-  getBugMetricsBySprints,
   getSprintTestMetrics,
 } from '../services/azure-teams.service';
-import { getBugMetricsServiceForClient } from '../factories/teams-factory';
+import { getBugLeakageBySprintForClient, getBugMetricsServiceForClient } from '../factories/teams-factory';
 const ADO_BACKEND_SETTINGS = process.env.ADO_BACKEND_SETTINGS || 'client-teamsettings'
 
 export const fetchBugMetricsBySprints = async (req: Request, res: Response) => {
@@ -55,7 +53,8 @@ export const fetchBugLeakageBySprint = async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Parameter "areaPaths" is required.' });
     }
     const areaPathsList = String(areaPaths).split(',').map(a => a.trim());
-    const results = await getBugLeakageBySprint(areaPathsList, Number(numSprints));
+    const getBugLeakageService = getBugLeakageBySprintForClient(ADO_BACKEND_SETTINGS);
+    const results = await getBugLeakageService(areaPathsList, Number(numSprints));
     return res.json(results);
   } catch (error) {
     console.error('Error to get Bug Leakage:', error);

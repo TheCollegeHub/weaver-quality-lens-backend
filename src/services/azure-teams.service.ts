@@ -5,7 +5,9 @@ import { getTestPlanData } from './azure-testplans.service.js';
 import { fetchWiql, fetchWorkItemsBatch } from '../repositories/azure-workitems.repository.js';
 import dayjs from 'dayjs';
 import _ from "lodash";
-import { fetchTeamIterations, fetchTeamIterationsByClassificationNodes } from '../repositories/azure-organization.repository.js';
+import { fetchTeamIterations, fetchTeamIterationsByClassificationNodes, getAllTeams, getTeamIterations } from '../repositories/azure-organization.repository.js';
+import { Iteration } from '../interfaces/teams-interface.js';
+import { normalizeSeverity } from './utils.js';
 
 
 const ADO_PROJECT = process.env.ADO_PROJECT
@@ -37,7 +39,7 @@ export async function getPastSprintsByTeamSettings(numSprints: number): Promise<
   return pastSprints;
 }
 
-export async function getPastSprintsByTeamSettingsV2(areaPaths: string[], numSprints: number): Promise<SprintData[]> {
+export async function getPastSprintsByClassificationNodes(areaPaths: string[], numSprints: number): Promise<SprintData[]> {
   const data = await fetchTeamIterationsByClassificationNodes();
   const now = new Date();
 
@@ -76,6 +78,50 @@ export async function getPastSprintsByTeamSettingsV2(areaPaths: string[], numSpr
   return allLastSprintsByTeam;
 }
 
+
+export async function getLastSprintsByAreaPaths(areaPaths: string[], numSprints: number): Promise<SprintData[]> {
+  const results: SprintData[] = [];
+  const teams = await getAllTeams();
+
+  for (const areaPath of areaPaths) {
+    const teamGuess = areaPath.split('\\').pop()?.toLowerCase() ?? '';
+    const matchedTeam = teams.find(team => team.name.toLowerCase().includes(teamGuess));
+
+    if (!matchedTeam) {
+      console.warn(`⚠️ None Team found for areaPath: ${areaPath}`);
+      continue;
+    }
+
+    try {
+      const iterations: Iteration[] = await getTeamIterations(matchedTeam.name);
+
+      const pastSprints = iterations
+        .filter(s =>
+          s.attributes?.startDate &&
+          s.attributes?.finishDate &&
+          s.attributes?.timeFrame === 'past'
+        )
+        .sort((a, b) =>
+          new Date(b.attributes.startDate).getTime() - new Date(a.attributes.startDate).getTime()
+        )
+        .slice(0, numSprints)
+        .map(s => ({
+          name: s.name,
+          iterationPath: s.path,
+          startDate: s.attributes.startDate,
+          finishDate: s.attributes.finishDate,
+          timeFrame: s.attributes.timeFrame,
+          teamName: matchedTeam.name
+        }));
+
+      results.push(...pastSprints);
+    } catch (error) {
+      console.error(`❌ Erorr to get iterations for team "${matchedTeam.name}":`, error);
+    }
+  }
+
+  return results;
+}
 
 export async function getBugMetricsBySprints(areaPaths: string[], numSprints: number): Promise<SprintBugReport> {
   const pastSprints = await getPastSprintsByTeamSettings(numSprints);
@@ -152,7 +198,9 @@ export async function getBugMetricsBySprints(areaPaths: string[], numSprints: nu
               ? new Date(item.fields['Microsoft.VSTS.Common.ClosedDate'])
               : null;
 
-            const severity = item.fields[ADO_SEVERITY_FIELD] || 'Unknown';
+            // const severity = item.fields[ADO_SEVERITY_FIELD] || 'Unknown';
+            const rawSeverity = item.fields[ADO_SEVERITY_FIELD] || 'Unknown';
+            const severity = normalizeSeverity(rawSeverity);
 
             const createdInSprint = created >= start && created <= end;
             
@@ -347,14 +395,25 @@ export async function getBugMetricsBySprints(areaPaths: string[], numSprints: nu
   };
 }
 
-export async function getBugMetricsBySprintsV2(areaPaths: string[], numSprints: number): Promise<SprintBugReport> {
-  const pastSprints = await getPastSprintsByTeamSettingsV2(areaPaths, numSprints);
-
-  // Extrai nomes únicos das sprints
-  const sprintNames = Array.from(new Set(pastSprints.map(s => s.name)));
+export async function getBugMetricsBySprintsByAreaPaths(areaPaths: string[], numSprints: number): Promise<any> {
+  const pastSprints = await getLastSprintsByAreaPaths(areaPaths, numSprints);
 
   const teamsBugs: SprintBugReport['teams'] = [];
-  const sprintOveralls: SprintBugReport['sprintOveralls'] = [];
+  const sprintOverallsMap = new Map<string, {
+    sprintName: string;
+    iterationPaths: string[];
+    startDates: string[];
+    finishDates: string[];
+    opened: number;
+    closed: number;
+    stillOpenRaw: number;
+    openedLinks: string[];
+    closedLinks: string[];
+    agingAboveThresholdLinks: string[];
+    agingDaysSum: number;
+    agingCount: number;
+    agingBySeverity: Record<string, { count: number; totalDays: number }>;
+  }>();
 
   let totalOpened = 0;
   let totalClosed = 0;
@@ -365,190 +424,115 @@ export async function getBugMetricsBySprintsV2(areaPaths: string[], numSprints: 
   let overallAgingAboveThresholdLinks: string[] = [];
   const overallAgingBySeverity: Record<string, { count: number; totalDays: number }> = {};
 
-  for (const sprintName of sprintNames) {
-    let sprintOpened = 0;
-    let sprintClosed = 0;
-    let sprintOpenedLinks: string[] = [];
-    let sprintClosedLinks: string[] = [];
-    let sprintTotalAgingDays = 0;
-    let sprintClosedForAging = 0;
-    let sprintAgingAboveThresholdLinks: string[] = [];
-    const sprintAgingBySeverity: Record<string, { count: number; totalDays: number }> = {};
+  for (const sprint of pastSprints) {
+    const teamName = sprint.teamName!.toLowerCase();
 
-    for (const areaPath of areaPaths) {
-      const teamName = areaPath.split('\\')[1]?.toLowerCase();
-      // Busca a sprint deste time
-      const sprint = pastSprints.find(s => s.teamName === teamName && s.name === sprintName);
-      if (!sprint) continue;
+    const areaPath = areaPaths.find(path => {
+      const normalizedPath = path.split('\\').pop()!.toLowerCase();
+      return teamName.includes(normalizedPath);
+    });
+    if (!areaPath) continue;
 
-      const start = new Date(sprint.startDate!);
-      const end = new Date(sprint.finishDate!);
-      end.setHours(23, 59, 59, 999);
-      const iterationPath = sprint.iterationPath
+    const start = new Date(sprint.startDate!);
+    const end = new Date(sprint.finishDate!);
+    end.setHours(23, 59, 59, 999);
+    const iterationPath = sprint.iterationPath;
 
-      let openedIds: number[] = [];
-      let closedIds: number[] = [];
-      let sprintAreaAgingTotal = 0;
-      let sprintAreaClosedCount = 0;
-      let agingAboveThresholdLinks: string[] = [];
-      const areaAgingBySeverity: Record<string, { count: number; totalDays: number }> = {};
+    let openedIds: number[] = [];
+    let closedIds: number[] = [];
+    let sprintAreaAgingTotal = 0;
+    let sprintAreaClosedCount = 0;
+    let agingAboveThresholdLinks: string[] = [];
+    const areaAgingBySeverity: Record<string, { count: number; totalDays: number }> = {};
 
-      const wiqlQuery = {
-        query: `
-          SELECT [System.Id]
-          FROM WorkItems
-          WHERE 
-            [System.TeamProject] = '${decodeURIComponent(ADO_PROJECT!)}'
-            AND [System.WorkItemType] = 'Bug'
-            AND [System.AreaPath] UNDER '${areaPath}'
-            AND [System.IterationPath] = '${iterationPath}'
-        `
-      };
+    const wiqlQuery = {
+      query: `
+        SELECT [System.Id]
+        FROM WorkItems
+        WHERE 
+          [System.TeamProject] = '${decodeURIComponent(ADO_PROJECT!)}'
+          AND [System.WorkItemType] = 'Bug'
+          AND [System.AreaPath] UNDER '${areaPath}'
+          AND [System.IterationPath] = '${iterationPath}'
+      `
+    };
 
-      const res = await fetchWiql(wiqlQuery);
-      const ids = res.data.workItems.map((w: any) => w.id);
+    const res = await fetchWiql(wiqlQuery);
+    const ids = res.data.workItems.map((w: any) => w.id);
 
-      if (ids.length) {
-        const batches = [];
-        for (let i = 0; i < ids.length; i += CHUNK_SIZE) {
-          batches.push(ids.slice(i, i + CHUNK_SIZE));
-        }
+    if (ids.length) {
+      const batches = [];
+      for (let i = 0; i < ids.length; i += CHUNK_SIZE) {
+        batches.push(ids.slice(i, i + CHUNK_SIZE));
+      }
 
-        for (const batch of batches) {
-          const detailRes = await fetchWorkItemsBatch({
-            ids: batch,
-            fields: [
-              'System.State',
-              'System.CreatedDate',
-              'Microsoft.VSTS.Common.ClosedDate',
-              ADO_SEVERITY_FIELD
-            ]
-          });
-          for (const item of detailRes.data.value) {
-            const created = new Date(item.fields['System.CreatedDate']);
-            const closed = item.fields['Microsoft.VSTS.Common.ClosedDate']
-              ? new Date(item.fields['Microsoft.VSTS.Common.ClosedDate'])
-              : null;
+      for (const batch of batches) {
+        const detailRes = await fetchWorkItemsBatch({
+          ids: batch,
+          fields: [
+            'System.State',
+            'System.CreatedDate',
+            'Microsoft.VSTS.Common.ClosedDate',
+            ADO_SEVERITY_FIELD
+          ]
+        });
 
-            const severity = item.fields[ADO_SEVERITY_FIELD] || 'Unknown';
+        for (const item of detailRes.data.value) {
+          const created = new Date(item.fields['System.CreatedDate']);
+          const closed = item.fields['Microsoft.VSTS.Common.ClosedDate']
+            ? new Date(item.fields['Microsoft.VSTS.Common.ClosedDate'])
+            : null;
 
-            const createdInSprint = created >= start && created <= end;
-            const closedInSprint = closed && closed >= start;
+          // const severity = item.fields[ADO_SEVERITY_FIELD] || 'Unknown';
+          const rawSeverity = item.fields[ADO_SEVERITY_FIELD] || 'Unknown';
+          const severity = normalizeSeverity(rawSeverity);
+          const createdInSprint = created >= start && created <= end;
+          const closedInSprint = closed && closed >= start;
 
-            if (createdInSprint) openedIds.push(item.id);
-            if (closedInSprint) {
-              closedIds.push(item.id);
+          if (createdInSprint) openedIds.push(item.id);
+          if (closedInSprint) {
+            closedIds.push(item.id);
 
-              const agingDays = Math.ceil((closed!.getTime() - created.getTime()) / (1000 * 60 * 60 * 24));
-              sprintAreaAgingTotal += agingDays;
-              sprintAreaClosedCount++;
-              sprintTotalAgingDays += agingDays;
-              sprintClosedForAging++;
-              totalAgingDays += agingDays;
-              totalClosedForAging++;
+            const agingDays = Math.ceil((closed!.getTime() - created.getTime()) / (1000 * 60 * 60 * 24));
+            sprintAreaAgingTotal += agingDays;
+            sprintAreaClosedCount++;
+            totalAgingDays += agingDays;
+            totalClosedForAging++;
 
-              if (!areaAgingBySeverity[severity]) {
-                areaAgingBySeverity[severity] = { count: 0, totalDays: 0 };
-              }
-              areaAgingBySeverity[severity].count++;
-              areaAgingBySeverity[severity].totalDays += agingDays;
+            if (!areaAgingBySeverity[severity]) areaAgingBySeverity[severity] = { count: 0, totalDays: 0 };
+            areaAgingBySeverity[severity].count++;
+            areaAgingBySeverity[severity].totalDays += agingDays;
 
-              if (!sprintAgingBySeverity[severity]) {
-                sprintAgingBySeverity[severity] = { count: 0, totalDays: 0 };
-              }
-              sprintAgingBySeverity[severity].count++;
-              sprintAgingBySeverity[severity].totalDays += agingDays;
+            if (!overallAgingBySeverity[severity]) overallAgingBySeverity[severity] = { count: 0, totalDays: 0 };
+            overallAgingBySeverity[severity].count++;
+            overallAgingBySeverity[severity].totalDays += agingDays;
 
-              if (!overallAgingBySeverity[severity]) {
-                overallAgingBySeverity[severity] = { count: 0, totalDays: 0 };
-              }
-              overallAgingBySeverity[severity].count++;
-              overallAgingBySeverity[severity].totalDays += agingDays;
-
-              if (agingDays > 7) {
-                const link = `https://dev.azure.com/${ADO_ORGANIZATION}/${ADO_PROJECT}/_workitems/edit/${item.id}`;
-                agingAboveThresholdLinks.push(link);
-                sprintAgingAboveThresholdLinks.push(link);
-                overallAgingAboveThresholdLinks.push(link);
-              }
+            if (agingDays > 7) {
+              const link = `https://dev.azure.com/${ADO_ORGANIZATION}/${ADO_PROJECT}/_workitems/edit/${item.id}`;
+              agingAboveThresholdLinks.push(link);
+              overallAgingAboveThresholdLinks.push(link);
             }
           }
         }
       }
-
-      const bugLink = (id: number) =>
-        `https://dev.azure.com/${ADO_ORGANIZATION}/${ADO_PROJECT}/_workitems/edit/${id}`;
-
-      const openedLinks = openedIds.map(bugLink);
-      const closedLinks = closedIds.map(bugLink);
-
-      totalOpened += openedIds.length;
-      totalClosed += closedIds.length;
-      totalOpenedLinks.push(...openedLinks);
-      totalClosedLinks.push(...closedLinks);
-
-      sprintOpened += openedIds.length;
-      sprintClosed += closedIds.length;
-      sprintOpenedLinks.push(...openedLinks);
-      sprintClosedLinks.push(...closedLinks);
-
-      const stillOpenRaw = openedIds.length === 0
-        ? 0
-        : ((openedIds.length - closedIds.length) / openedIds.length) * 100;
-
-      const stillOpenPct = `${Math.max(0, stillOpenRaw).toFixed(2)}%`;
-
-      const bugAgingBySeverityArray = Object.entries(areaAgingBySeverity)
-        .sort(([a], [b]) => a.localeCompare(b))
-        .map(([severity, data]) => ({
-          severity,
-          count: data.count,
-          averageDays: (data.totalDays / data.count).toFixed(2)
-        }));
-
-      let team = teamsBugs.find(team => team.areaPath === areaPath);
-      if (!team) {
-        team = {
-          areaPath,
-          sprints: []
-        };
-        teamsBugs.push(team);
-      }
-
-      const sprintMetric = {
-        sprint: {
-          name: sprintName,
-          iterationPath,
-          startDate: sprint.startDate,
-          finishDate: sprint.finishDate
-        },
-        openAndClosedBugMetric: {
-          opened: {
-            total: openedIds.length,
-            bugLinks: openedLinks
-          },
-          closed: {
-            total: closedIds.length,
-            bugLinks: closedLinks
-          },
-          stillOpen: stillOpenPct
-        },
-        bugAging: {
-          averageDays: sprintAreaClosedCount === 0 ? null : (sprintAreaAgingTotal / sprintAreaClosedCount).toFixed(2),
-          agingAboveThresholdLinks,
-          bugAgingBySeverity: bugAgingBySeverityArray
-        }
-      };
-      team.sprints.push(sprintMetric);
     }
 
-    const sprintStillOpenRaw = sprintOpened === 0
+    const bugLink = (id: number) =>
+      `https://dev.azure.com/${ADO_ORGANIZATION}/${ADO_PROJECT}/_workitems/edit/${id}`;
+    const openedLinks = openedIds.map(bugLink);
+    const closedLinks = closedIds.map(bugLink);
+
+    totalOpened += openedIds.length;
+    totalClosed += closedIds.length;
+    totalOpenedLinks.push(...openedLinks);
+    totalClosedLinks.push(...closedLinks);
+
+    const stillOpenRaw = openedIds.length === 0
       ? 0
-      : ((sprintOpened - sprintClosed) / sprintOpened) * 100;
+      : ((openedIds.length - closedIds.length) / openedIds.length) * 100;
+    const stillOpenPct = `${Math.max(0, stillOpenRaw).toFixed(2)}%`;
 
-    const sprintStillOpenPct = `${Math.max(0, sprintStillOpenRaw).toFixed(2)}%`;
-
-    const sprintAgingBySeverityArray = Object.entries(sprintAgingBySeverity)
+    const bugAgingBySeverityArray = Object.entries(areaAgingBySeverity)
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([severity, data]) => ({
         severity,
@@ -556,36 +540,113 @@ export async function getBugMetricsBySprintsV2(areaPaths: string[], numSprints: 
         averageDays: (data.totalDays / data.count).toFixed(2)
       }));
 
-    sprintOveralls.push({
+    let team = teamsBugs.find(team => team.areaPath === areaPath);
+    if (!team) {
+      team = {
+        areaPath,
+        sprints: []
+      };
+      teamsBugs.push(team);
+    }
+
+    team.sprints.push({
       sprint: {
-        name: sprintName,
-        iterationPath: "", 
-        startDate: "",
-        finishDate: ""
+        name: sprint.name,
+        iterationPath,
+        startDate: sprint.startDate,
+        finishDate: sprint.finishDate
       },
       openAndClosedBugMetric: {
         opened: {
-          total: sprintOpened,
-          bugLinks: sprintOpenedLinks
+          total: openedIds.length,
+          bugLinks: openedLinks
         },
         closed: {
-          total: sprintClosed,
-          bugLinks: sprintClosedLinks
+          total: closedIds.length,
+          bugLinks: closedLinks
         },
-        stillOpen: sprintStillOpenPct
+        stillOpen: stillOpenPct
       },
       bugAging: {
-        averageDays: sprintClosedForAging === 0 ? null : (sprintTotalAgingDays / sprintClosedForAging).toFixed(2),
-        agingAboveThresholdLinks: sprintAgingAboveThresholdLinks,
-        bugAgingBySeverity: sprintAgingBySeverityArray
+        averageDays: sprintAreaClosedCount === 0 ? "0" : (sprintAreaAgingTotal / sprintAreaClosedCount).toFixed(2),
+        agingAboveThresholdLinks,
+        bugAgingBySeverity: bugAgingBySeverityArray
       }
     });
+
+    // Agrupar sprintOveralls por nome da sprint
+    const existing = sprintOverallsMap.get(sprint.name);
+    if (existing) {
+      existing.opened += openedIds.length;
+      existing.closed += closedIds.length;
+      existing.stillOpenRaw += stillOpenRaw;
+      existing.openedLinks.push(...openedLinks);
+      existing.closedLinks.push(...closedLinks);
+      existing.agingAboveThresholdLinks.push(...agingAboveThresholdLinks);
+      existing.agingDaysSum += sprintAreaAgingTotal;
+      existing.agingCount += sprintAreaClosedCount;
+      existing.iterationPaths.push(iterationPath);
+      existing.startDates.push(sprint.startDate!);
+      existing.finishDates.push(sprint.finishDate!);
+
+      for (const [severity, data] of Object.entries(areaAgingBySeverity)) {
+        if (!existing.agingBySeverity[severity]) existing.agingBySeverity[severity] = { count: 0, totalDays: 0 };
+        existing.agingBySeverity[severity].count += data.count;
+        existing.agingBySeverity[severity].totalDays += data.totalDays;
+      }
+    } else {
+      sprintOverallsMap.set(sprint.name, {
+        sprintName: sprint.name,
+        iterationPaths: [iterationPath],
+        startDates: [sprint.startDate!],
+        finishDates: [sprint.finishDate!],
+        opened: openedIds.length,
+        closed: closedIds.length,
+        stillOpenRaw,
+        openedLinks: [...openedLinks],
+        closedLinks: [...closedLinks],
+        agingAboveThresholdLinks: [...agingAboveThresholdLinks],
+        agingDaysSum: sprintAreaAgingTotal,
+        agingCount: sprintAreaClosedCount,
+        agingBySeverity: { ...areaAgingBySeverity }
+      });
+    }
   }
+
+  const sprintOveralls = Array.from(sprintOverallsMap.values()).map(group => ({
+    sprint: {
+      name: group.sprintName,
+      iterationPath: group.iterationPaths.join(' | '),
+      startDate: group.startDates[0],
+      finishDate: group.finishDates[0]
+    },
+    openAndClosedBugMetric: {
+      opened: {
+        total: group.opened,
+        bugLinks: group.openedLinks
+      },
+      closed: {
+        total: group.closed,
+        bugLinks: group.closedLinks
+      },
+      stillOpen: `${Math.max(0, group.stillOpenRaw / (group.iterationPaths.length || 1)).toFixed(2)}%`
+    },
+    bugAging: {
+      averageDays: group.agingCount === 0 ? null : (group.agingDaysSum / group.agingCount).toFixed(2),
+      agingAboveThresholdLinks: group.agingAboveThresholdLinks,
+      bugAgingBySeverity: Object.entries(group.agingBySeverity)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([severity, data]) => ({
+          severity,
+          count: data.count,
+          averageDays: (data.totalDays / data.count).toFixed(2)
+        }))
+    }
+  }));
 
   const overallStillOpenRaw = totalOpened === 0
     ? 0
     : ((totalOpened - totalClosed) / totalOpened) * 100;
-
   const overallStillOpenPct = `${Math.max(0, overallStillOpenRaw).toFixed(2)}%`;
 
   const overallAgingBySeverityArray = Object.entries(overallAgingBySeverity)
@@ -619,7 +680,6 @@ export async function getBugMetricsBySprintsV2(areaPaths: string[], numSprints: 
     }
   };
 }
-
 
 export async function getBugDetailsFromLinks(links: string[]) {
   const apiVersion = process.env.AZURE_API_VERSION;
@@ -743,7 +803,9 @@ export async function getBugLeakageBreakdown(areaPaths: string[]) {
           for (const item of detailRes.data.value) {
             const envRaw = item.fields[ADO_BUG_ENVIRONMT_CUSTOM_FIELD!] || 'UNKNOWN';
             const env = envRaw.trim().toUpperCase();
-            const severity = item.fields[ADO_SEVERITY_FIELD] || 'UNKNOWN';
+            // const severity = item.fields[ADO_SEVERITY_FIELD] || 'UNKNOWN';
+            const rawSeverity = item.fields[ADO_SEVERITY_FIELD] || 'Unknown';
+            const severity = normalizeSeverity(rawSeverity);
 
             if (env.includes(ADO_PROD_ENVIRONMENT_LABEL)) {
               prodCount++;
@@ -835,7 +897,6 @@ export async function getBugLeakageBreakdown(areaPaths: string[]) {
 }
 
 export async function getBugLeakageBySprint(areaPaths: string[], numSprints: number): Promise<BugLeakageBySprintResult> {
-  const apiVersion = process.env.AZURE_API_VERSION!;
   const project = decodeURIComponent(process.env.ADO_PROJECT!);
   const ADO_BUG_ENVIRONMT_CUSTOM_FIELD = process.env.ADO_BUG_ENVIRONMT_CUSTOM_FIELD!;
   const ADO_PROD_ENVIRONMENT_LABEL = process.env.ADO_PROD_ENVIRONMENT_LABEL!;
@@ -901,7 +962,9 @@ export async function getBugLeakageBySprint(areaPaths: string[], numSprints: num
           for (const bug of detailRes.data.value) {
             const envRaw = bug.fields[ADO_BUG_ENVIRONMT_CUSTOM_FIELD] || 'UNKNOWN';
             const env = envRaw.trim().toUpperCase();
-            const sev = bug.fields[ADO_SEVERITY_FIELD] || 'UNKNOWN';
+            // const sev = bug.fields[ADO_SEVERITY_FIELD] || 'UNKNOWN';
+            const rawSeverity = bug.fields[ADO_SEVERITY_FIELD] || 'Unknown';
+            const sev = normalizeSeverity(rawSeverity);
 
             if (env.includes(ADO_PROD_ENVIRONMENT_LABEL)) {
               prodCount++;
@@ -1057,6 +1120,238 @@ export async function getBugLeakageBySprint(areaPaths: string[], numSprints: num
 
   return results;
 }
+
+export async function getBugLeakageBySprintByAreaPaths(
+  areaPaths: string[],
+  numSprints: number
+): Promise<BugLeakageBySprintResult> {
+  const project = decodeURIComponent(process.env.ADO_PROJECT!);
+  const ADO_BUG_ENVIRONMT_CUSTOM_FIELD = process.env.ADO_BUG_ENVIRONMT_CUSTOM_FIELD!;
+  const ADO_PROD_ENVIRONMENT_LABEL = process.env.ADO_PROD_ENVIRONMENT_LABEL!;
+
+  const sprintCounts: Record<string, { prod: number; preProd: number }> = {};
+  const sprintEnvAgg: Record<string, Record<string, { total: number; severities: Record<string, number> }>> = {};
+  const overallEnvAgg: Record<string, { total: number; severities: Record<string, number> }> = {};
+
+  const results: BugLeakageBySprintResult = {
+    teams: [],
+    sprintOverall: [],
+    overall: [],
+    overallSeverity: {
+      total: 0,
+      severities: [],
+      distributionByEnv: []
+    }
+  };
+
+  // Pegando as sprints passadas para todas as areaPaths
+  const recentSprints: SprintData[] = await getLastSprintsByAreaPaths(areaPaths, numSprints);
+
+  // Agrupar sprints com o mesmo nome (mesmo sprint pode aparecer para times diferentes)
+  const sprintsGroupedByName: Record<string, SprintData[]> = {};
+  for (const sprint of recentSprints) {
+    if (!sprintsGroupedByName[sprint.name]) {
+      sprintsGroupedByName[sprint.name] = [];
+    }
+    sprintsGroupedByName[sprint.name].push(sprint);
+  }
+
+  // Agora itera por sprint agrupada pelo nome
+  for (const sprintName of Object.keys(sprintsGroupedByName).sort()) {
+    const sprintGroup = sprintsGroupedByName[sprintName];
+
+    // Para cada sprint, somamos os bugs para todas as áreas / times que participam do sprint com esse nome
+    let prodCount = 0;
+    let preProdCount = 0;
+    const envMap: Record<string, { total: number; severities: Record<string, number> }> = {};
+
+    // Iterar para cada sprint que tem o mesmo nome, mas times diferentes
+    for (const sprint of sprintGroup) {
+      const areaPathFromSprint = areaPaths.find(area => sprint.iterationPath.startsWith(area)) || ''; // tentar associar ao areaPath
+
+      const wiql = {
+        query: `
+          SELECT [System.Id]
+            FROM WorkItems
+           WHERE [System.TeamProject] = '${project}'
+             AND [System.WorkItemType] = 'Bug'
+             AND [System.AreaPath] UNDER '${areaPathFromSprint}'
+             AND [System.IterationPath] = '${sprint.iterationPath}'
+        `
+      };
+
+      const wiqlRes = await fetchWiql(wiql);
+      const ids: number[] = wiqlRes.data.workItems.map((w: any) => w.id);
+
+      if (ids.length) {
+        for (let i = 0; i < ids.length; i += CHUNK_SIZE) {
+          const batch = ids.slice(i, i + CHUNK_SIZE);
+
+          const detailRes = await fetchWorkItemsBatch({
+            ids: batch,
+            fields: [
+              'System.Id',
+              ADO_BUG_ENVIRONMT_CUSTOM_FIELD,
+              ADO_SEVERITY_FIELD
+            ]
+          });
+
+          for (const bug of detailRes.data.value) {
+            const envRaw = bug.fields[ADO_BUG_ENVIRONMT_CUSTOM_FIELD] || 'UNKNOWN';
+            const env = envRaw.trim()
+            // const sev = bug.fields[ADO_SEVERITY_FIELD] || 'UNKNOWN';
+            const rawSeverity = bug.fields[ADO_SEVERITY_FIELD] || 'Unknown';
+            const sev = normalizeSeverity(rawSeverity);
+            
+            if (env.includes(ADO_PROD_ENVIRONMENT_LABEL)) {
+              prodCount++;
+            } else {
+              preProdCount++;
+            }
+
+            if (!envMap[env]) {
+              envMap[env] = { total: 0, severities: {} };
+            }
+            envMap[env].total++;
+            envMap[env].severities[sev] = (envMap[env].severities[sev] || 0) + 1;
+          }
+        }
+      }
+
+      results.teams.push({
+        areaPath: areaPathFromSprint,
+        sprint: sprintName,
+        totalBugs: prodCount + preProdCount,
+        bugLeakagePct: prodCount + preProdCount === 0 ? '0.00%' : `${((prodCount / (prodCount + preProdCount)) * 100).toFixed(2)}%`,
+        environments: Object.entries(envMap)
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([env, { total, severities }]) => ({
+            environment: env,
+            total,
+            severities: Object.entries(severities)
+              .filter(([, c]) => c > 0)
+              .sort(([a], [b]) => a.localeCompare(b))
+              .map(([severity, count]) => ({ severity, total: count }))
+          }))
+      });
+    }
+
+    const total = prodCount + preProdCount;
+    const pct = total === 0 ? '0.00%' : `${((prodCount / total) * 100).toFixed(2)}%`;
+
+    sprintCounts[sprintName] = sprintCounts[sprintName] || { prod: 0, preProd: 0 };
+    sprintCounts[sprintName].prod += prodCount;
+    sprintCounts[sprintName].preProd += preProdCount;
+
+    sprintEnvAgg[sprintName] = sprintEnvAgg[sprintName] || {};
+    for (const [env, { total: envTotal, severities }] of Object.entries(envMap)) {
+      const sprintAgg = sprintEnvAgg[sprintName][env] || { total: 0, severities: {} };
+      sprintAgg.total += envTotal;
+      for (const [sev, count] of Object.entries(severities)) {
+        sprintAgg.severities[sev] = (sprintAgg.severities[sev] || 0) + count;
+      }
+      sprintEnvAgg[sprintName][env] = sprintAgg;
+
+      const overallAgg = overallEnvAgg[env] || { total: 0, severities: {} };
+      overallAgg.total += envTotal;
+      for (const [sev, count] of Object.entries(severities)) {
+        overallAgg.severities[sev] = (overallAgg.severities[sev] || 0) + count;
+      }
+      overallEnvAgg[env] = overallAgg;
+    }
+  }
+
+  // Montar resultado sprintOverall
+  results.sprintOverall = Object.entries(sprintCounts)
+    .map(([sprint, { prod, preProd }]) => {
+      const total = prod + preProd;
+      const pct = total === 0 ? '0.00%' : `${((prod / total) * 100).toFixed(2)}%`;
+      const environments: LeakEnvDetail[] = Object.entries(sprintEnvAgg[sprint] || {})
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([env, { total, severities }]) => ({
+          environment: env,
+          total,
+          severities: Object.entries(severities)
+            .filter(([, c]) => c > 0)
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([severity, count]) => ({ severity, total: count }))
+        }));
+
+      return {
+        sprint,
+        totalBugs: total,
+        prod,
+        preProd,
+        bugLeakagePct: pct,
+        environments
+      };
+    })
+    .sort((a, b) => a.sprint.localeCompare(b.sprint));
+
+  // Montar resultado overall
+  results.overall = Object.entries(overallEnvAgg)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([env, { total, severities }]) => ({
+      environment: env,
+      total,
+      severities: Object.entries(severities)
+        .filter(([, c]) => c > 0)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([severity, count]) => ({ severity, total: count }))
+    }));
+
+  // Calcular taxas por severidade em overall
+  for (const env of results.overall) {
+    const total = env.total;
+    for (const sev of env.severities) {
+      const pct = total > 0 ? (sev.total / total) * 100 : 0;
+      sev.rate = `${pct.toFixed(2)}%`;
+    }
+  }
+
+  // Calcular dados globais de severidade
+  const severityCountMap: Record<string, number> = {};
+  const severityEnvCountMap: Record<string, { prod: number; nonProd: number }> = {};
+
+  for (const envName in overallEnvAgg) {
+    const env = overallEnvAgg[envName];
+    for (const sev in env.severities) {
+      severityCountMap[sev] = (severityCountMap[sev] || 0) + env.severities[sev];
+      if (!severityEnvCountMap[sev]) {
+        severityEnvCountMap[sev] = { prod: 0, nonProd: 0 };
+      }
+      if (envName.includes(ADO_PROD_ENVIRONMENT_LABEL)) {
+        severityEnvCountMap[sev].prod += env.severities[sev];
+      } else {
+        severityEnvCountMap[sev].nonProd += env.severities[sev];
+      }
+    }
+  }
+
+  results.overallSeverity.total = Object.values(severityCountMap).reduce((a, b) => a + b, 0);
+  results.overallSeverity.severities = Object.entries(severityCountMap)
+    .map(([sev, total]) => ({
+      severity: sev,
+      total,
+      rate: `${((total / results.overallSeverity.total) * 100).toFixed(2)}%`
+    }))
+    .sort((a, b) => a.severity.localeCompare(b.severity));
+
+  results.overallSeverity.distributionByEnv = Object.entries(severityEnvCountMap)
+  .map(([sev, { prod, nonProd }]) => {
+    const total = prod + nonProd;
+    return {
+      severity: sev,
+      totalProd: prod,
+      totalNonProd: nonProd,
+      prodPct: total > 0 ? ((prod / total) * 100).toFixed(2) + '%' : '0.00%',
+      nonProdPct: total > 0 ? ((nonProd / total) * 100).toFixed(2) + '%' : '0.00%',
+    };
+  });
+
+  return results;
+}
+
 
 export const getSprintTestMetrics = async (areaPaths: string[], numSprints: number) => {
   const allSprintMetrics: Record<string, SprintMetrics[]> = {};
