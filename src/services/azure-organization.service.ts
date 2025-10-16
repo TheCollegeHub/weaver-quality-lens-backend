@@ -15,7 +15,9 @@ export async function getAllAreaPaths(): Promise<AreaPath[]> {
   const paths: AreaPath[] = [];
 
   function traverse(node: AreaNode, parentPath = '') {
+    // Use single backslashes for Azure DevOps compatibility
     const fullPath = parentPath ? `${parentPath}\\${node.name}` : node.name;
+    
     paths.push({ id: node.identifier || fullPath, name: fullPath });
 
     if (node.children) {

@@ -7,6 +7,8 @@
     "start": "node --loader ts-node/esm src/server.ts"
   },
   "dependencies": {
+    "@types/swagger-jsdoc": "^6.0.4",
+    "@types/swagger-ui-express": "^4.1.8",
     "axios": "^1.5.0",
     "axios-retry": "^4.5.0",
     "cors": "^2.8.5",
@@ -14,7 +16,9 @@
     "dotenv": "^16.3.1",
     "express": "^4.18.2",
     "ioredis": "^5.3.1",
-    "lodash": "^4.17.21"
+    "lodash": "^4.17.21",
+    "swagger-jsdoc": "^6.2.8",
+    "swagger-ui-express": "^5.0.1"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",
