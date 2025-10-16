@@ -126,7 +126,7 @@ export async function fetchRecentTestRuns(days: number = 90) {
       const response = await azureClient.get(url);
       runs.push(...response.data.value);
     } catch (err) {
-      console.error(`Erro ao buscar runs entre ${min} e ${max}`, err);
+      console.error(`Error to get Runs between ${min} and ${max}`, err);
     }
 
     current = next;

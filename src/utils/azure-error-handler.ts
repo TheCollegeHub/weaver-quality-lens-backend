@@ -60,6 +60,10 @@ export enum ErrorCodes {
   // Data validation errors
   EMPTY_RESPONSE = 'EMPTY_RESPONSE',
   INVALID_RESPONSE = 'INVALID_RESPONSE',
+  INVALID_REQUEST = 'INVALID_REQUEST',
+  
+  // Resource limits
+  RESOURCE_LIMIT = 'RESOURCE_LIMIT',
   
   // Generic errors
   API_ERROR = 'API_ERROR',
