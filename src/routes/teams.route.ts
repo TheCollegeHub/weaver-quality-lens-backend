@@ -23,7 +23,7 @@ const router = Router();
  *         schema:
  *           type: string
  *         description: Comma-separated list of area paths or teams
- *         example: "Kantar Automation Platform\\Core,Kantar Automation Platform\\Testing"
+ *         example: "MyProject\\Team,MyProject\\Testing"
  *       - in: query
  *         name: numSprints
  *         required: true
@@ -155,8 +155,8 @@ router.post('/v1/teams/bug-details', fetchBugDetails);
  *                 description: Array of area paths or teams to analyze
  *           example:
  *             areaPaths:
- *               - "Kantar Automation Platform\\Core"
- *               - "Kantar Automation Platform\\Testing"
+ *               - "MyProject\\Team"
+ *               - "MyProject\\Testing"
  *     responses:
  *       200:
  *         description: Bug leakage analysis completed successfully
@@ -226,7 +226,7 @@ router.post('/v1/teams/bug-leakage', fetchBugLeakage);
  *         schema:
  *           type: string
  *         description: Comma-separated list of area paths
- *         example: "Kantar Automation Platform\\Core"
+ *         example: "MyProject\\Team"
  *       - in: query
  *         name: numSprints
  *         required: true
@@ -331,7 +331,7 @@ router.get('/v1/teams/bug-leakage-sprint', fetchBugLeakageBySprint);
  *         schema:
  *           type: string
  *         description: Comma-separated list of area paths
- *         example: "Kantar Automation Platform\\Core"
+ *         example: "MyProject\\Team"
  *       - in: query
  *         name: numSprints
  *         required: true

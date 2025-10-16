@@ -67,7 +67,7 @@ const options = {
             name: {
               type: 'string',
               description: 'Test Plan name',
-              example: 'Sprint 15 - Core Team Tests',
+              example: 'Sprint 15 - The Team Tests',
             },
           },
           required: ['id', 'name'],
@@ -80,7 +80,7 @@ const options = {
             team: {
               type: 'string',
               description: 'Team area path',
-              example: 'Kantar Automation Platform\\Core',
+              example: 'MyProject\\Team',
             },
             totalTestPlans: {
               type: 'number',
@@ -357,7 +357,7 @@ const options = {
             name: {
               type: 'string',
               description: 'Area path name',
-              example: 'Kantar Automation Platform\\Core',
+              example: 'MyProject\\Team',
             },
           },
         },

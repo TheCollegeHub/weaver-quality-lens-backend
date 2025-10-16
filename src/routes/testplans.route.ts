@@ -24,7 +24,7 @@ const router = Router();
  *         schema:
  *           type: string
  *         description: Comma-separated list of area paths
- *         example: "Kantar Automation Platform\\Core,Kantar Automation Platform\\Testing"
+ *         example: "MyProject\\Team,MyProject\\Testing"
  *     responses:
  *       200:
  *         description: Test plans successfully retrieved
@@ -81,7 +81,7 @@ router.get('/v1/testplans', fetchTestPlans);
  *               $ref: '#/components/schemas/TestPlan'
  *           example:
  *             - id: 12345
- *               name: "Sprint 15 - Core Team Tests"
+ *               name: "Sprint 15 - The Team Tests"
  *             - id: 12346
  *               name: "Sprint 15 - API Tests"
  *     responses:
@@ -255,7 +255,7 @@ router.post('/v1/testplans/suites/coverage', automationCoveragePerSuite);
  *         schema:
  *           type: string
  *         description: Comma-separated list of area paths
- *         example: "Kantar Automation Platform\\Core"
+ *         example: "MyProject\\Team"
  *     responses:
  *       200:
  *         description: Test cases successfully retrieved

@@ -25,9 +25,9 @@ const router = Router();
  *                 summary: Successful response
  *                 value:
  *                   - id: "304c9ee4-0776-4f09-80d0-5bc4a06f80dc"
- *                     name: "Kantar Automation Platform"
+ *                     name: "MyProject"
  *                   - id: "40b06b29-21f8-4b7a-b3a2-1fde2226ea15"
- *                     name: "Kantar Automation Platform\\Core"
+ *                     name: "MyProject\\Team"
  *       500:
  *         description: Internal server error
  *         content:

@@ -1,15 +1,5 @@
 import { fetchAreaNodes } from "../repositories/azure-organization.repository";
-
-interface AreaNode {
-  name: string;
-  identifier?: string;
-  children?: AreaNode[];
-}
-
-interface AreaPath {
-  id: string;
-  name: string;
-}
+import { AreaNode, AreaPath } from "../types/azure-types";
 
 export async function getAllAreaPaths(): Promise<AreaPath[]> {
   const paths: AreaPath[] = [];

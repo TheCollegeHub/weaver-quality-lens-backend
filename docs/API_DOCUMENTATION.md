@@ -55,35 +55,141 @@ Currently, the API uses server-side authentication with Azure DevOps and SonarQu
 # Step 1: Get available area paths
 curl -X GET "http://localhost:3000/api/v1/organization/areaPaths"
 
-# Step 2: Get test plans for a specific team
-curl -X GET "http://localhost:3000/api/v1/testplans?areaPaths=Kantar Automation Platform\Core"
+# Response example:
+# [
+#   {"id": "1", "name": "MyProject"},
+#   {"id": "2", "name": "MyProject\\Frontend"},
+#   {"id": "3", "name": "MyProject\\Backend"},
+#   {"id": "4", "name": "MyProject\\QA"}
+# ]
 
-# Step 3: Analyze automation metrics
+# Step 2: Get test plans for specific teams
+curl -X GET "http://localhost:3000/api/v1/testplans?areaPaths=MyProject\Frontend,MyProject\Backend"
+
+# Step 3: Analyze automation metrics for multiple test plans
 curl -X POST "http://localhost:3000/api/v1/testplans/automation-metrics" \
   -H "Content-Type: application/json" \
-  -d '[{"id": 12345, "name": "Sprint 15 Tests"}]'
+  -d '[
+    {"id": 12345, "name": "Frontend Sprint 15 Tests"},
+    {"id": 12346, "name": "Backend API Tests"},
+    {"id": 12347, "name": "Integration Tests"}
+  ]'
 ```
 
 ### 2. Bug Analysis Workflow
 
 ```bash
-# Get bug metrics for recent sprints
-curl -X GET "http://localhost:3000/api/v1/teams/bugs-by-sprint?areaPaths=Kantar Automation Platform\Core&numSprints=5"
+# Get bug metrics for recent sprints across multiple teams
+curl -X GET "http://localhost:3000/api/v1/teams/bugs-by-sprint?areaPaths=MyProject\Frontend,MyProject\Backend&numSprints=5"
 
-# Analyze bug leakage patterns
+# Response example:
+# {
+#   "sprintMetrics": [
+#     {
+#       "sprintName": "Sprint 15",
+#       "totalBugs": 12,
+#       "criticalBugs": 2,
+#       "resolvedBugs": 10
+#     }
+#   ]
+# }
+
+# Analyze bug leakage patterns with date range
 curl -X POST "http://localhost:3000/api/v1/teams/bug-leakage" \
   -H "Content-Type: application/json" \
-  -d '{"areaPaths": ["Kantar Automation Platform\\Core"]}'
+  -d '{
+    "areaPaths": ["MyProject\\Frontend", "MyProject\\Backend", "MyProject\\QA"],
+    "startDate": "2024-01-01",
+    "endDate": "2024-03-31"
+  }'
+
+# Get detailed bug information for specific areas
+curl -X POST "http://localhost:3000/api/v1/teams/bug-details" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "areaPaths": ["MyProject\\Mobile"],
+    "severity": ["High", "Critical"],
+    "state": ["Active", "New"]
+  }'
 ```
 
 ### 3. Code Quality Integration
 
 ```bash
-# Search for components in SonarQube
+# Search for projects in SonarQube
 curl -X GET "http://localhost:3000/api/v1/components/search?qualifiers=TRK&page=1&size=50"
 
-# Get detailed metrics for a component
-curl -X GET "http://localhost:3000/api/v1/measures/component?componentKey=my-project:main"
+# Response example:
+# {
+#   "components": [
+#     {
+#       "key": "my-frontend-app",
+#       "name": "Frontend Application",
+#       "qualifier": "TRK"
+#     },
+#     {
+#       "key": "my-backend-api",
+#       "name": "Backend API Service",
+#       "qualifier": "TRK"
+#     }
+#   ]
+# }
+
+# Get detailed quality metrics for multiple components
+curl -X GET "http://localhost:3000/api/v1/measures/component?componentKey=my-frontend-app&metricKeys=coverage,bugs,vulnerabilities,code_smells,duplicated_lines_density"
+
+# Get metrics for a specific branch
+curl -X GET "http://localhost:3000/api/v1/measures/component?componentKey=my-backend-api&branch=develop&metricKeys=coverage,reliability_rating,security_rating"
+```
+
+### 4. Advanced Test Management
+
+```bash
+# Get test cases ready for automation
+curl -X GET "http://localhost:3000/api/v1/testcases?areaPaths=MyProject\QA&status=Ready"
+
+# Analyze test case usage patterns
+curl -X POST "http://localhost:3000/api/v1/testcases/usage" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "testPlanIds": [12345, 12346],
+    "dateRange": {
+      "startDate": "2024-01-01",
+      "endDate": "2024-03-31"
+    }
+  }'
+
+# Get automation coverage per test suite
+curl -X POST "http://localhost:3000/api/v1/testplans/suites/coverage" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "testPlanId": 12345,
+    "includeChildSuites": true
+  }'
+```
+
+### 5. Sprint and Team Metrics
+
+```bash
+# Get comprehensive sprint automation metrics
+curl -X GET "http://localhost:3000/api/v1/teams/sprints/automation-metrics?areaPaths=MyProject\Development&numSprints=3"
+
+# Get bug leakage analysis by sprint
+curl -X GET "http://localhost:3000/api/v1/teams/bug-leakage-sprint?areaPaths=MyProject\QA,MyProject\Development&numSprints=5"
+
+# Track newly automated tests over time
+curl -X POST "http://localhost:3000/api/v1/testplans/new-automations" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "testPlans": [
+      {"id": 12345, "name": "Web UI Tests"},
+      {"id": 12346, "name": "API Tests"}
+    ],
+    "dateRange": {
+      "startDate": "2024-01-01",
+      "endDate": "2024-12-31"
+    }
+  }'
 ```
 
 ## Data Models
