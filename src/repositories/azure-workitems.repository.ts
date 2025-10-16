@@ -1,18 +1,89 @@
 import { azureClient } from '../utils/azure-client.js';
+import { AzureApiError, ErrorCodes } from '../utils/azure-error-handler.js';
+
 const AZURE_API_VERSION = process.env.AZURE_API_VERSION;
 const ADO_PROJECT = process.env.ADO_PROJECT
 
 export async function fetchWiql(wiqlQuery: { query: string }) {
+  // Validate input
+  if (!wiqlQuery || !wiqlQuery.query || typeof wiqlQuery.query !== 'string') {
+    throw new AzureApiError(
+      'Invalid WIQL query: query parameter is required and must be a string',
+      400,
+      ErrorCodes.INVALID_CONFIG
+    );
+  }
+
+  if (!ADO_PROJECT) {
+    throw new AzureApiError(
+      'Azure DevOps project not configured',
+      500,
+      ErrorCodes.MISSING_CONFIG
+    );
+  }
+
   const response = await azureClient.post(`/${ADO_PROJECT}/_apis/wit/wiql?api-version=${AZURE_API_VERSION}`, wiqlQuery);
   return response;
 }
 
 export async function fetchWorkItemsBatch(batch: { ids: number[], fields: string[] }) {
+  // Validate input
+  if (!batch || !Array.isArray(batch.ids) || !Array.isArray(batch.fields)) {
+    throw new AzureApiError(
+      'Invalid batch request: ids and fields must be arrays',
+      400,
+      ErrorCodes.INVALID_CONFIG
+    );
+  }
+
+  if (batch.ids.length === 0) {
+    throw new AzureApiError(
+      'Invalid batch request: ids array cannot be empty',
+      400,
+      ErrorCodes.INVALID_CONFIG
+    );
+  }
+
+  if (batch.ids.length > 200) {
+    throw new AzureApiError(
+      'Invalid batch request: maximum 200 work items per batch',
+      400,
+      ErrorCodes.INVALID_CONFIG
+    );
+  }
+
   const response = await azureClient.post(`/_apis/wit/workitemsbatch?api-version=${AZURE_API_VERSION}`, batch);
   return response;
 }
 
 export async function fetchWorkItemsByIds(chunckStringIds: string, fields: string) {
+  // Validate input
+  if (!chunckStringIds || typeof chunckStringIds !== 'string') {
+    throw new AzureApiError(
+      'Invalid work item IDs: must be a non-empty string',
+      400,
+      ErrorCodes.INVALID_CONFIG
+    );
+  }
+
+  if (!fields || typeof fields !== 'string') {
+    throw new AzureApiError(
+      'Invalid fields parameter: must be a non-empty string',
+      400,
+      ErrorCodes.INVALID_CONFIG
+    );
+  }
+
+  // Check for reasonable limits
+  const ids = chunckStringIds.split(',').filter(Boolean);
+  if (ids.length > 200) {
+    throw new AzureApiError(
+      'Too many work item IDs: maximum 200 items per request',
+      400,
+      ErrorCodes.INVALID_CONFIG
+    );
+  }
+
   const response = await azureClient.get(
       `/_apis/wit/workitems?ids=${chunckStringIds}&fields=${fields}&api-version=${AZURE_API_VERSION}`
     );

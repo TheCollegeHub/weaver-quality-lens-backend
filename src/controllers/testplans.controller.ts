@@ -9,21 +9,106 @@ import {
 } from '../services/azure-testplans.service.js';
 import { AutomationRequestBody, NewAutomatedTestsData } from '../interfaces/sprint-automation-metrics-interface.js';
 import { TestPlan } from '../interfaces/testplans-interface.js';
+import { AzureApiError, AzureErrorHandler, ErrorCodes } from '../utils/azure-error-handler.js';
+import { AxiosError } from 'axios';
 
 export async function fetchTestPlans(req: Request, res: Response) {
-  const { areaPaths } = req.query;
-  const areaPathList = areaPaths ? String(areaPaths).split(',').map(p => p.trim()) : undefined;
-
-  if (!areaPathList || areaPathList.length === 0) {
-    return res.status(400).json({ error: 'areaPaths is required' });
-  }
-
   try {
-    const project = process.env.ADO_PROJECT!;
+    // Validate request parameters
+    const { areaPaths } = req.query;
+    
+    if (!areaPaths) {
+      return res.status(400).json({
+        error: 'areaPaths parameter is required',
+        code: ErrorCodes.INVALID_CONFIG,
+        timestamp: new Date().toISOString()
+      });
+    }
+
+    // Parse and validate area paths
+    const areaPathList = String(areaPaths).split(',').map(p => p.trim()).filter(Boolean);
+    
+    if (areaPathList.length === 0) {
+      return res.status(400).json({
+        error: 'areaPaths must contain at least one valid area path',
+        code: ErrorCodes.INVALID_CONFIG,
+        timestamp: new Date().toISOString()
+      });
+    }
+
+    // Validate area path format and length
+    const invalidPaths = areaPathList.filter(path => 
+      path.length === 0 || 
+      path.length > 255 || 
+      /[<>"|*?]/.test(path) // Check for invalid characters
+    );
+
+    if (invalidPaths.length > 0) {
+      return res.status(400).json({
+        error: `Invalid area path format: ${invalidPaths.join(', ')}`,
+        code: ErrorCodes.INVALID_CONFIG,
+        timestamp: new Date().toISOString()
+      });
+    }
+
+    // Limit the number of area paths to prevent abuse
+    if (areaPathList.length > 50) {
+      return res.status(400).json({
+        error: 'Too many area paths requested. Maximum 50 allowed per request.',
+        code: ErrorCodes.INVALID_CONFIG,
+        timestamp: new Date().toISOString()
+      });
+    }
+
+    console.log(`Fetching test plans for ${areaPathList.length} area paths: ${areaPathList.join(', ')}`);
+
     const result = await getTestPlansByAreaPaths(areaPathList);
+    
+    // Log successful response metrics
+    const totalPlans = result.reduce((sum, team) => sum + team.totalTestPlans, 0);
+    console.log(`Successfully retrieved ${totalPlans} test plans across ${result.length} teams`);
+
     res.json(result);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
+
+  } catch (error: any) {
+    console.error('Error in fetchTestPlans:', error);
+
+    // Handle Azure API specific errors
+    if (error instanceof AzureApiError) {
+      return res.status(error.statusCode).json({
+        error: error.message,
+        code: error.code,
+        retryable: error.isRetryable,
+        timestamp: error.timestamp
+      });
+    }
+
+    // Handle Axios errors (convert to AzureApiError)
+    if (error.isAxiosError) {
+      const azureError = AzureErrorHandler.handleAxiosError(error as AxiosError, 'fetchTestPlans');
+      return res.status(azureError.statusCode).json({
+        error: azureError.message,
+        code: azureError.code,
+        retryable: azureError.isRetryable,
+        timestamp: azureError.timestamp
+      });
+    }
+
+    // Handle validation errors from service layer
+    if (error.message && error.message.includes('areaPaths are required')) {
+      return res.status(400).json({
+        error: 'Invalid area paths provided',
+        code: ErrorCodes.INVALID_CONFIG,
+        timestamp: new Date().toISOString()
+      });
+    }
+
+    // Handle generic errors
+    return res.status(500).json({
+      error: 'Failed to fetch test plans. Please try again later.',
+      code: ErrorCodes.INTERNAL_ERROR,
+      timestamp: new Date().toISOString()
+    });
   }
 }
 

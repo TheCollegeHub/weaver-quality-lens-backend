@@ -5,6 +5,8 @@ import { AutomationStatus } from "../enums/automaton-status.js";
 import { NewAutomatedTestsData } from "../interfaces/sprint-automation-metrics-interface.js";
 import { fetchRecentTestRuns, fetchTestResultsByRun, fetchWiql, fetchWorkItemById, fetchWorkItemRevisions, fetchWorkItemsBatch, fetchWorkItemsByIds } from "../repositories/azure-workitems.repository.js";
 import { fetchTestCasesFromSuite, fetchTestPlanSuites, fetchTestPointsFromSuite } from "../repositories/azure-testplans.repository.js";
+import { AzureApiError, AzureErrorHandler, ErrorCodes } from '../utils/azure-error-handler.js';
+import { AxiosError } from 'axios';
 import _ from "lodash";
 
 const ADO_ORGANIZATION = process.env.ADO_ORGANIZATION
@@ -20,8 +22,33 @@ const CHUNK_SIZE = 200
 export async function getTestPlansByAreaPaths(
   areaPaths: string[]
 ): Promise<TeamTestPlans[]> {
+  // Input validation
   if (!areaPaths || areaPaths.length === 0) {
-    throw new Error('areaPaths are required');
+    throw new AzureApiError(
+      'areaPaths parameter is required and must contain at least one area path',
+      400,
+      ErrorCodes.INVALID_CONFIG
+    );
+  }
+
+  // Validate environment configuration
+  if (!ADO_PROJECT) {
+    throw new AzureApiError(
+      'Azure DevOps project not configured. ADO_PROJECT environment variable is required.',
+      500,
+      ErrorCodes.MISSING_CONFIG
+    );
+  }
+
+  // Sanitize and validate area paths
+  const sanitizedAreaPaths = areaPaths.map(path => path.trim()).filter(Boolean);
+  
+  if (sanitizedAreaPaths.length === 0) {
+    throw new AzureApiError(
+      'No valid area paths provided after sanitization',
+      400,
+      ErrorCodes.INVALID_CONFIG
+    );
   }
 
   const wiqlQuery = {
@@ -29,55 +56,187 @@ export async function getTestPlansByAreaPaths(
       SELECT [System.Id], [System.Title], [System.AreaPath]
       FROM WorkItems
       WHERE [System.WorkItemType] = 'Test Plan'
-      AND [System.AreaPath] IN (${areaPaths.map(path => `'${path.trim()}'`).join(',')})
+      AND [System.AreaPath] IN (${sanitizedAreaPaths.map(path => `'${path.replace(/'/g, "''")}'`).join(',')})
       ORDER BY [System.CreatedDate] DESC
     `,
   };
 
-  try {
-    const wiqlResponse = await fetchWiql(wiqlQuery);
+  let attempts = 0;
+  const maxRetries = 3;
+  const retryDelay = 1000; // Start with 1 second
 
-    const ids = wiqlResponse.data.workItems.map((wi: any) => wi.id);
+  while (attempts < maxRetries) {
+    try {
+      attempts++;
+      console.log(`Attempting to fetch test plans (attempt ${attempts}/${maxRetries}) for area paths: ${sanitizedAreaPaths.join(', ')}`);
 
-    if (ids.length === 0) {
-      return areaPaths.map(area => ({
-        team: area,
-        totalTestPlans: 0,
-        testplans: [],
-      }));
-    }
+      const wiqlResponse = await fetchWiql(wiqlQuery);
 
-    const idChunks = _.chunk(ids, CHUNK_SIZE);
-    const detailPromises = idChunks.map(chunkIds =>
-      fetchWorkItemsByIds(chunkIds.join(','), 'System.Id,System.Title,System.AreaPath')
-    );
+      // Validate response structure
+      if (!wiqlResponse || !wiqlResponse.data) {
+        throw new AzureApiError(
+          'Invalid response structure from Azure DevOps WIQL query',
+          500,
+          ErrorCodes.INVALID_RESPONSE
+        );
+      }
 
-    const detailResponses = await Promise.all(detailPromises);
-    const rawPlans = detailResponses.flatMap((res: { data: { value: any[]; }; }) =>
-      res.data.value.map((item: any) => ({
-        id: item.id,
-        name: item.fields['System.Title'],
-        areaPath: item.fields['System.AreaPath'],
-      }))
-    );
+      const workItems = wiqlResponse.data.workItems || [];
+      const ids = workItems.map((wi: any) => wi.id).filter(Boolean);
 
-    const grouped: TeamTestPlans[] = areaPaths.map(area => {
-      const plans = rawPlans.filter((p: any)  => p.areaPath === area);
-      return {
-        team: area,
-        totalTestPlans: plans.length,
-        testplans: plans.map((p: TestPlan) => ({
-          id: p.id,
-          name: p.name,
-        })),
+      console.log(`Found ${ids.length} test plan IDs from WIQL query`);
+
+      // Return empty results if no test plans found
+      if (ids.length === 0) {
+        console.log('No test plans found for the specified area paths');
+        return sanitizedAreaPaths.map(area => ({
+          team: area,
+          totalTestPlans: 0,
+          testplans: [],
+        }));
+      }
+
+      // Process in chunks to respect Azure DevOps API limits
+      const idChunks = _.chunk(ids, CHUNK_SIZE);
+      console.log(`Processing ${ids.length} test plans in ${idChunks.length} chunks`);
+
+      const detailPromises = idChunks.map(async (chunkIds, index) => {
+        try {
+          console.log(`Fetching details for chunk ${index + 1}/${idChunks.length} (${chunkIds.length} items)`);
+          return await fetchWorkItemsByIds(chunkIds.join(','), 'System.Id,System.Title,System.AreaPath');
+        } catch (error) {
+          console.error(`Error fetching chunk ${index + 1}:`, error);
+          if (error instanceof AxiosError) {
+            throw AzureErrorHandler.handleAxiosError(error, `fetchWorkItemsByIds chunk ${index + 1}`);
+          }
+          throw error;
+        }
+      });
+
+      const detailResponses = await Promise.all(detailPromises);
+      
+      // Validate and process responses
+      const rawPlans = detailResponses.flatMap((res: { data: { value: any[]; }; }) => {
+        if (!res || !res.data || !Array.isArray(res.data.value)) {
+          console.warn('Invalid response structure in work items batch');
+          return [];
+        }
+        
+        return res.data.value.map((item: any) => {
+          if (!item || !item.fields) {
+            console.warn('Invalid work item structure:', item);
+            return null;
+          }
+          
+          return {
+            id: item.id,
+            name: item.fields['System.Title'] || 'Untitled Test Plan',
+            areaPath: item.fields['System.AreaPath'],
+          };
+        }).filter(Boolean);
+      });
+
+      console.log(`Successfully processed ${rawPlans.length} test plans`);
+
+      // Debug: Log area paths for comparison
+      console.log('Input area paths:', sanitizedAreaPaths);
+      if (rawPlans.length > 0) {
+        console.log('Sample Azure DevOps area paths:', [...new Set(rawPlans.map(p => p?.areaPath).filter(Boolean))].slice(0, 5));
+      }
+
+      // Normalize area paths for comparison (handle backslash escaping issues)
+      const normalizeAreaPath = (path: string): string => {
+        return path.replace(/\\\\/g, '\\'); // Convert double backslashes to single
       };
-    });
 
-    return grouped;
-  } catch (err) {
-    console.error('Error getting test plans by area paths using WIQL:', err);
-    throw err;
+      // Create a map of normalized paths to original input paths
+      const normalizedInputPaths = new Map<string, string>();
+      sanitizedAreaPaths.forEach(path => {
+        const normalized = normalizeAreaPath(path);
+        normalizedInputPaths.set(normalized, path);
+      });
+
+      // Group by area path using normalized comparison
+      const grouped: TeamTestPlans[] = sanitizedAreaPaths.map(area => {
+        const normalizedArea = normalizeAreaPath(area);
+        const plans = rawPlans.filter((p: any) => {
+          if (!p || !p.areaPath) return false;
+          const normalizedPlanArea = normalizeAreaPath(p.areaPath);
+          return normalizedPlanArea === normalizedArea;
+        });
+        
+        console.log(`Area path "${area}" (normalized: "${normalizedArea}") matched ${plans.length} test plans`);
+        
+        return {
+          team: normalizedArea, // Return normalized path to avoid double backslashes
+          totalTestPlans: plans.length,
+          testplans: plans.map((p: any) => ({
+            id: p.id,
+            name: p.name,
+          })),
+        };
+      });
+
+      console.log(`Returning results for ${grouped.length} teams with total ${rawPlans.length} test plans`);
+      return grouped;
+
+    } catch (error: any) {
+      console.error(`Attempt ${attempts} failed:`, error);
+
+      // Handle specific Azure API errors
+      if (error instanceof AzureApiError) {
+        // Don't retry client errors (4xx) except for rate limiting
+        if (error.statusCode >= 400 && error.statusCode < 500 && error.code !== ErrorCodes.RATE_LIMIT) {
+          throw error;
+        }
+        
+        // Retry server errors and rate limiting
+        if (attempts < maxRetries && (error.isRetryable || error.statusCode >= 500)) {
+          const delay = retryDelay * Math.pow(2, attempts - 1); // Exponential backoff
+          console.log(`Retrying in ${delay}ms... (${maxRetries - attempts} attempts remaining)`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+          continue;
+        }
+        throw error;
+      }
+
+      // Handle Axios errors
+      if (error.isAxiosError) {
+        const azureError = AzureErrorHandler.handleAxiosError(error as AxiosError, 'getTestPlansByAreaPaths');
+        
+        // Retry on server errors or rate limiting
+        if (attempts < maxRetries && (azureError.isRetryable || azureError.statusCode >= 500)) {
+          const delay = retryDelay * Math.pow(2, attempts - 1);
+          console.log(`Retrying in ${delay}ms... (${maxRetries - attempts} attempts remaining)`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+          continue;
+        }
+        throw azureError;
+      }
+
+      // Handle other errors
+      if (attempts < maxRetries) {
+        const delay = retryDelay * Math.pow(2, attempts - 1);
+        console.log(`Unknown error, retrying in ${delay}ms... (${maxRetries - attempts} attempts remaining)`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        continue;
+      }
+
+      // Final attempt failed
+      throw new AzureApiError(
+        `Failed to fetch test plans after ${maxRetries} attempts: ${error.message}`,
+        500,
+        ErrorCodes.API_ERROR
+      );
+    }
   }
+
+  // This should never be reached, but included for completeness
+  throw new AzureApiError(
+    'Unexpected error: retry loop completed without success or failure',
+    500,
+    ErrorCodes.UNKNOWN_ERROR
+  );
 }
 
 export async function getAutomationMetricsForPlans(
