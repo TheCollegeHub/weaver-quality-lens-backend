@@ -111,14 +111,6 @@ npm run build
 npm start
 ```
 
-## Docker Support
-
-Use the provided `docker-compose.yml` for local development with Redis:
-
-```bash
-docker-compose up redis
-```
-
 ## Documentation
 
 - **API Documentation**: Available at `/api-docs` when server is running
